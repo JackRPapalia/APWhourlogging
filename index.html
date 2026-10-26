@@ -33,16 +33,11 @@
   button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   button.small { padding: 4px 10px; font-size: 13px; }
   button.danger { background: transparent; color: var(--danger); border-color: transparent; }
-  button.link { background: none; border: 0; padding: 0; color: var(--accent); font-size: 13px; }
   button:disabled { opacity: .5; cursor: default; }
   .error { color: var(--danger); font-size: 14px; min-height: 20px; margin-top: 8px; }
   .ok { color: var(--ok); }
   .muted { color: var(--muted); }
   .auth { max-width: 380px; margin: 60px auto; }
-  .auth .field { margin-bottom: 12px; }
-  .auth .divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; margin: 16px 0; }
-  .auth .divider::before, .auth .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
-  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
   .week { border-top: 1px solid var(--border); padding: 16px 0; }
   .week:first-child { border-top: 0; padding-top: 0; }
   .week-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
@@ -97,20 +92,9 @@
 <template id="tpl-auth">
   <div class="card auth">
     <h2>APW Hours Log</h2>
-    <div class="tabs">
-      <button class="ghost small active" data-mode="login">Log in</button>
-      <button class="ghost small" data-mode="signup">Create account</button>
-    </div>
-    <form id="auth-form">
-      <div class="field signup-only hidden"><label for="a-name">Full name</label><input id="a-name" autocomplete="name"></div>
-      <div class="field"><label for="a-email">Email</label><input id="a-email" type="email" autocomplete="email" required></div>
-      <div class="field"><label for="a-pass">Password</label><input id="a-pass" type="password" autocomplete="current-password" required></div>
-      <button type="submit" style="width:100%">Log in</button>
-      <div class="login-only" style="margin-top:10px"><button type="button" class="link" id="forgot">Forgot password?</button></div>
-      <div class="error" id="auth-error"></div>
-    </form>
-    <div class="divider">or</div>
-    <button type="button" class="ghost" id="google" style="width:100%">Continue with Google</button>
+    <p class="muted" style="font-size:14px;margin:-6px 0 18px">Sign in with your Google account to log your hours.</p>
+    <button type="button" id="google" style="width:100%">Sign in with Google</button>
+    <div class="error" id="auth-error"></div>
   </div>
 </template>
 
@@ -169,8 +153,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  updateProfile, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, signOut,
+  getAuth, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { firebaseConfig, SCRIPT_URL } from "./config.js";
 
@@ -178,7 +161,6 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const app = $("#app");
 let me = null;
 let view = "student";
-let pendingName = ""; // full name typed at sign-up, sent with the first request
 
 if (firebaseConfig.apiKey.startsWith("PASTE")) {
   app.innerHTML = `<div class="card auth"><h2>Almost there</h2><p class="muted">Paste your Firebase web config into <code>config.js</code> to turn on login. See the README for the steps.</p></div>`;
@@ -231,13 +213,6 @@ async function busy(button, label, fn) {
 
 function authMessage(ex) {
   const messages = {
-    "auth/invalid-credential": "Wrong email or password",
-    "auth/wrong-password": "Wrong email or password",
-    "auth/user-not-found": "Wrong email or password",
-    "auth/invalid-email": "Enter a valid email address",
-    "auth/missing-password": "Enter your password",
-    "auth/email-already-in-use": "An account with that email already exists. Try logging in.",
-    "auth/weak-password": "Password must be at least 6 characters",
     "auth/too-many-requests": "Too many attempts. Wait a minute and try again.",
     "auth/popup-blocked": "Your browser blocked the Google sign-in window. Allow popups for this site and try again.",
     "auth/popup-closed-by-user": "",
@@ -269,8 +244,7 @@ onAuthStateChanged(auth, async user => {
   if (!user) { me = null; view = "student"; return render(); }
   loading();
   try {
-    const data = await api("me", { name: pendingName || user.displayName || "" });
-    pendingName = "";
+    const data = await api("me", { name: user.displayName || "" });
     me = data.user;
     view = me.is_admin ? "admin" : "student";
     render(data);
@@ -282,47 +256,10 @@ onAuthStateChanged(auth, async user => {
 // ---------- auth ----------
 function renderAuth() {
   app.replaceChildren($("#tpl-auth").content.cloneNode(true));
-  let mode = "login";
-  const form = $("#auth-form"), err = $("#auth-error"), submit = form.querySelector("button[type=submit]");
-  app.querySelectorAll("[data-mode]").forEach(btn => btn.onclick = () => {
-    mode = btn.dataset.mode;
-    app.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === btn));
-    $(".signup-only").classList.toggle("hidden", mode !== "signup");
-    $(".login-only").classList.toggle("hidden", mode !== "login");
-    $("#a-name").required = mode === "signup";
-    $("#a-pass").autocomplete = mode === "signup" ? "new-password" : "current-password";
-    submit.textContent = mode === "signup" ? "Create account" : "Log in";
+  const err = $("#auth-error"), button = $("#google");
+  button.onclick = async () => {
     err.textContent = "";
-  });
-  form.onsubmit = async e => {
-    e.preventDefault();
-    err.textContent = "";
-    const email = $("#a-email").value.trim(), password = $("#a-pass").value;
-    try {
-      await busy(submit, mode === "signup" ? "Creating account…" : "Logging in…", async () => {
-        if (mode === "signup") {
-          pendingName = $("#a-name").value.trim();
-          const { user } = await createUserWithEmailAndPassword(auth, email, password);
-          await updateProfile(user, { displayName: pendingName });
-        } else {
-          await signInWithEmailAndPassword(auth, email, password);
-        }
-      });
-    } catch (ex) { err.textContent = authMessage(ex); }
-  };
-  $("#forgot").onclick = async () => {
-    const email = $("#a-email").value.trim();
-    err.className = "error";
-    if (!email) { err.textContent = "Enter your email above, then click Forgot password."; return; }
-    try {
-      await sendPasswordResetEmail(auth, email);
-      err.className = "error ok";
-      err.textContent = `If there's an account for ${email}, a reset link is on its way.`;
-    } catch (ex) { err.textContent = authMessage(ex); }
-  };
-  $("#google").onclick = async () => {
-    err.textContent = "";
-    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+    try { await busy(button, "Signing in…", () => signInWithPopup(auth, new GoogleAuthProvider())); }
     catch (ex) { err.textContent = authMessage(ex); }
   };
 }

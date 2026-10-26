@@ -2,7 +2,7 @@
 
 Weekly hours logging for an advanced programming class, hosted on GitHub Pages.
 
-- **Login** uses Firebase Authentication: email and password, or Google. Students can reset their own passwords.
+- **Login** uses Firebase Authentication with Google sign-in only. Students use their Google (e.g. school) accounts, so there are no passwords to manage.
 - **Data** lives in a Google Sheet. A Google Apps Script ([`apps_script.gs`](apps_script.gs)) is the backend. It checks every request's Firebase login with Google before it reads or writes anything.
 - **The first person to sign in becomes the admin.** Everyone after that is a student. Admins can make other people admins.
 
@@ -27,7 +27,7 @@ You can type or edit hours rows directly in the sheet. A row counts toward which
 ### 1. Firebase
 
 1. In the [Firebase console](https://console.firebase.google.com/), create a project, or use an existing one.
-2. **Build → Authentication → Get started.** Under **Sign-in method**, enable **Email/Password** and **Google**.
+2. **Build → Authentication → Get started.** Under **Sign-in method**, enable **Google**. Leave **Email/Password** off.
 3. **Authentication → Settings → Authorized domains:** add `jackrpapalia.github.io`. `localhost` is already there.
 4. **Project settings (gear icon) → General → Your apps:** add a **Web app** (`</>`). Copy the `firebaseConfig` values into [`config.js`](config.js).
 
@@ -53,4 +53,4 @@ Then open http://localhost:8000. Opening `index.html` straight from Finder won't
 ## Security notes
 
 - `config.js` is public on purpose: Firebase web config isn't a secret, and neither is the script URL. What protects the data is the Apps Script, which checks each request's Firebase ID token with Google and allows admin actions only for users whose role is `admin`.
-- Anyone can create an account. That's how students join, but it means a stranger who finds the site could sign up as a "student." Admins can see everyone in the overview. If you want to limit sign-ups to school emails, that's a small change in `registerUser_`.
+- Anyone with a Google account can sign in. That's how students join, but it means a stranger who finds the site could join as a "student." Admins can see everyone in the overview. If you want to limit sign-ins to school emails, that's a small change in `registerUser_`.

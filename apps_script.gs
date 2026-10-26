@@ -44,22 +44,50 @@ function authorize() {
   Logger.log('Authorized. The web app can now check Firebase logins.');
 }
 
+// Actions that change the sheet. They take the script lock up front; everything else
+// only reads, so many students can load the page at once without queueing.
+const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'saveWeek', 'deleteWeek', 'addUsers', 'removeUser'];
+
+// Per-request state: tab reads are remembered until something is written (each Sheets
+// call is slow), and the lock is only held when this request needs to write.
+let REQ = { memo: {}, lock: null };
+
 function doPost(e) {
   let result;
+  REQ = { memo: {}, lock: null };
   try {
     const body = JSON.parse((e.postData && e.postData.contents) || '{}');
     const auth = verifyToken_(body.idToken);
-    const lock = LockService.getScriptLock();
-    lock.waitLock(20000);
-    try {
-      result = route_(body, auth);
-    } finally {
-      lock.releaseLock();
-    }
+    if (WRITE_ACTIONS.indexOf(body.action) !== -1) lock_();
+    result = route_(body, auth);
   } catch (err) {
     result = { error: String((err && err.message) || err) };
+  } finally {
+    if (REQ.lock) REQ.lock.releaseLock();
   }
   return json_(result);
+}
+
+function memo_(key, fn) {
+  if (key in REQ.memo) return REQ.memo[key];
+  const value = fn(); // may call changed_(), which replaces REQ.memo, so store afterwards
+  REQ.memo[key] = value;
+  return value;
+}
+
+// Call after any write so later reads in this request see it.
+function changed_() {
+  REQ.memo = {};
+}
+
+// Takes the script lock before a write. Returns true if it was only just taken, in which
+// case another request may have written in the meantime and the caller should re-check.
+function lock_() {
+  if (REQ.lock) return false;
+  REQ.lock = LockService.getScriptLock();
+  REQ.lock.waitLock(20000);
+  changed_();
+  return true;
 }
 
 function route_(body, auth) {
@@ -88,11 +116,11 @@ function route_(body, auth) {
     case 'saveWeek':
       requireAdmin();
       saveWeek_(body);
-      return { weeks: listWeeks_() };
+      return { weeks: listWeeks_(), overview: overview_() };
     case 'deleteWeek':
       requireAdmin();
       deleteWeek_(body.id);
-      return { weeks: listWeeks_() };
+      return { weeks: listWeeks_(), overview: overview_() };
     case 'addUsers':
       requireAdmin();
       return Object.assign(addUsers_(body), { overview: overview_() });
@@ -130,35 +158,51 @@ function verifyToken_(idToken) {
 function registerUser_(auth, name) {
   let access = access_(auth.email);
   if (!access.is_admin && !access.section && rosterEmails_(ADMINS_SHEET).length === 0) {
-    addToRoster_(ADMINS_SHEET, auth.email); // nobody is an admin yet, so the first person in becomes one
+    lock_();
+    // Nobody is an admin yet, so the first person in becomes one.
+    if (rosterEmails_(ADMINS_SHEET).length === 0) appendToRoster_(ADMINS_SHEET, [auth.email]);
     access = access_(auth.email);
   }
   if (!access.is_admin && !access.section) {
     fail_(`${auth.email} isn't on the class list yet. Ask your teacher to add you, then sign in again.`);
   }
-  const t = table_(USERS_SHEET, USERS_HEADERS);
-  const row = t.rows.find(r => String(r.email).toLowerCase() === auth.email);
   const cleanName = String(name || auth.name || '').trim().slice(0, 80);
-  let display = row ? String(row.name || '') : '';
-  if (!row) {
-    display = cleanName || auth.email.split('@')[0];
-    writeRow_(t, null, { email: auth.email, name: display, joined: today_() });
-  } else if (!display && cleanName) {
-    display = cleanName;
-    writeRow_(t, row._row, { name: cleanName });
+  const find = () => table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === auth.email);
+  let row = find();
+  if (!row || (!row.name && cleanName)) {
+    if (lock_()) row = find();
+    const t = table_(USERS_SHEET, USERS_HEADERS);
+    if (!row) writeRow_(t, null, { email: auth.email, name: cleanName || auth.email.split('@')[0], joined: today_() });
+    else if (!row.name && cleanName) writeRow_(t, row._row, { name: cleanName });
+    row = find();
   }
-  return { email: auth.email, name: display || auth.email, is_admin: access.is_admin, section: access.section };
+  return { email: auth.email, name: String((row && row.name) || auth.email), is_admin: access.is_admin, section: access.section };
 }
 
 // ---------- rosters ----------
 
+// Tab by name (case and surrounding spaces ignored); blank means the first tab.
+function sheetNamed_(name) {
+  const tabs = memo_('tabs', () => {
+    const list = SpreadsheetApp.getActiveSpreadsheet().getSheets();
+    const byName = {};
+    list.forEach(sh => { byName[sh.getName().trim().toLowerCase()] = sh; });
+    return { first: list[0], byName };
+  });
+  return name ? tabs.byName[name.trim().toLowerCase()] || null : tabs.first;
+}
+
 function rosterSheet_(name) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sh = ss.getSheets().find(s => s.getName().trim().toLowerCase() === name.toLowerCase());
+  const sh = sheetNamed_(name);
   if (sh) return sh;
-  const created = ss.insertSheet(name, ss.getNumSheets());
-  created.getRange(1, 1).setValue('Email').setFontWeight('bold');
-  created.setFrozenRows(1);
+  lock_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const created = ss.getSheetByName(name) || ss.insertSheet(name, ss.getNumSheets());
+  if (!created.getLastRow()) {
+    created.getRange(1, 1).setValue('Email').setFontWeight('bold');
+    created.setFrozenRows(1);
+  }
+  changed_();
   return created;
 }
 
@@ -172,26 +216,28 @@ function isEmail_(s) {
 
 // [{ email, row }] for every email in column A of a roster tab; headers and blanks are skipped.
 function rosterRows_(name) {
-  const sh = rosterSheet_(name);
-  const last = sh.getLastRow();
-  if (!last) return [];
-  return sh.getRange(1, 1, last, 1).getValues()
-    .map((r, i) => ({ email: cleanEmail_(r[0]), row: i + 1 }))
-    .filter(r => isEmail_(r.email));
+  return memo_('roster:' + name, () => {
+    return rosterSheet_(name).getDataRange().getValues()
+      .map((r, i) => ({ email: cleanEmail_(r[0]), row: i + 1 }))
+      .filter(r => isEmail_(r.email));
+  });
 }
 
 function rosterEmails_(name) {
   return rosterRows_(name).map(r => r.email);
 }
 
-function addToRoster_(name, email) {
+function appendToRoster_(name, emails) {
+  if (!emails.length) return;
   const sh = rosterSheet_(name);
-  sh.getRange(sh.getLastRow() + 1, 1).setValue(email);
+  sh.getRange(sh.getLastRow() + 1, 1, emails.length, 1).setValues(emails.map(e => [e]));
+  changed_();
 }
 
-function removeFromRoster_(name, email) {
+function removeFromRoster_(name, emails) {
   const sh = rosterSheet_(name);
-  rosterRows_(name).filter(r => r.email === email).map(r => r.row).sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+  rosterRows_(name).filter(r => emails.indexOf(r.email) !== -1).map(r => r.row).sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+  changed_();
 }
 
 // { is_admin, section } for one email, from the roster tabs.
@@ -217,16 +263,19 @@ function addUsers_(body) {
   const others = {}; // other section's name -> its emails, read once
   if (group !== 'admin') SECTIONS.filter(s => s !== group).forEach(s => { others[s] = rosterEmails_(s); });
   const result = { added: [], moved: [], already: [] };
+  const moves = {}; // other section -> emails leaving it
   emails.forEach(email => {
     if (existing.indexOf(email) !== -1) return result.already.push(email);
-    if (group !== 'admin') {
-      const other = Object.keys(others).find(s => others[s].indexOf(email) !== -1);
-      if (other) { removeFromRoster_(other, email); result.moved.push(email); } else result.added.push(email);
+    const other = Object.keys(others).find(s => others[s].indexOf(email) !== -1);
+    if (other) {
+      (moves[other] = moves[other] || []).push(email);
+      result.moved.push(email);
     } else {
       result.added.push(email);
     }
-    addToRoster_(tab, email);
   });
+  Object.keys(moves).forEach(s => removeFromRoster_(s, moves[s]));
+  appendToRoster_(tab, result.added.concat(result.moved));
   return result;
 }
 
@@ -235,9 +284,9 @@ function removeUser_(me, body) {
   const group = String(body.group || '');
   if (group === 'admin') {
     if (email === me.email) fail_("You can't remove yourself from Admins");
-    removeFromRoster_(ADMINS_SHEET, email);
+    removeFromRoster_(ADMINS_SHEET, [email]);
   } else if (SECTIONS.indexOf(group) !== -1) {
-    removeFromRoster_(group, email);
+    removeFromRoster_(group, [email]);
   } else {
     fail_('Unknown group');
   }
@@ -254,10 +303,12 @@ function weekRows_(t) {
 }
 
 function listWeeks_() {
-  ensureCurrentWeek_();
-  return weekRows_(table_(WEEKS_SHEET, WEEKS_HEADERS))
-    .sort((a, b) => (a.start < b.start ? -1 : 1))
-    .map(w => ({ id: w.id, label: w.label, start: w.start, end: w.end }));
+  return memo_('weeks', () => {
+    ensureCurrentWeek_();
+    return weekRows_(table_(WEEKS_SHEET, WEEKS_HEADERS))
+      .sort((a, b) => (a.start < b.start ? -1 : 1))
+      .map(w => ({ id: w.id, label: w.label, start: w.start, end: w.end }));
+  });
 }
 
 function nextId_(weeks) {
@@ -268,10 +319,17 @@ function nextId_(weeks) {
 // Creates the Monday–Sunday week containing today, trimmed so it doesn't overlap
 // any week the admin already set up. Admins can relabel or adjust it afterward.
 function ensureCurrentWeek_() {
-  const t = table_(WEEKS_SHEET, WEEKS_HEADERS);
-  const weeks = weekRows_(t);
   const today = today_();
-  if (weeks.some(w => w.start <= today && today <= w.end)) return;
+  let t = table_(WEEKS_SHEET, WEEKS_HEADERS);
+  let weeks = weekRows_(t);
+  const covered = () => weeks.some(w => w.start <= today && today <= w.end);
+  if (covered()) return;
+  if (lock_()) {
+    // Another request may have added it while we waited for the lock.
+    t = table_(WEEKS_SHEET, WEEKS_HEADERS);
+    weeks = weekRows_(t);
+    if (covered()) return;
+  }
   let start = addDays_(today, -weekday_(today));
   let end = addDays_(start, 6);
   const prevEnd = weeks.filter(w => w.end < today).map(w => w.end).sort().pop();
@@ -368,6 +426,7 @@ function deleteEntry_(me, body) {
 // admins who aren't in a section are included too, so the class list can show them.
 function overview_() {
   const weeks = listWeeks_();
+  // Descriptions are included so the admin page can open a student's weeks without another request.
   const hours = hoursByUser_(weeks);
   const names = {};
   table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || ''); });
@@ -387,6 +446,7 @@ function overview_() {
       name: names[email] || email,
       signed_in: email in names,
       hours: per,
+      entries: hours[email] || {},
       total: Math.round(total * 100) / 100,
     });
   });
@@ -411,16 +471,26 @@ function userEntries_(email) {
 // Reads a tab (creating it with headers if missing) into { sh, cols, width, rows }.
 // Each row is { _row, _raw, <lowercase header>: value }.
 function table_(name, headers) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sh = name ? ss.getSheetByName(name) : ss.getSheets()[0];
+  return memo_('table:' + name, () => readTable_(name, headers));
+}
+
+function readTable_(name, headers) {
+  let sh = sheetNamed_(name);
   if (!sh) {
-    sh = ss.insertSheet(name, ss.getNumSheets());
-    sh.getRange(1, 1, sh.getMaxRows(), headers.length).setNumberFormat('@'); // keep dates as plain text
-    sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-    sh.setFrozenRows(1);
+    lock_();
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    sh = ss.getSheetByName(name);
+    if (!sh) {
+      sh = ss.insertSheet(name, ss.getNumSheets());
+      sh.getRange(1, 1, sh.getMaxRows(), headers.length).setNumberFormat('@'); // keep dates as plain text
+      sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+      sh.setFrozenRows(1);
+    }
+    changed_();
   }
-  const width = Math.max(sh.getLastColumn(), headers.length);
-  const values = sh.getRange(1, 1, Math.max(sh.getLastRow(), 1), width).getValues();
+  const values = sh.getDataRange().getValues(); // one read for the whole tab
+  const width = Math.max(values[0].length, headers.length);
+  values.forEach(r => { while (r.length < width) r.push(''); });
   const header = values[0].map(h => String(h).trim().toLowerCase());
   const cols = {};
   headers.forEach(h => {
@@ -450,6 +520,7 @@ function writeRow_(t, row, fields) {
   const line = existing ? existing._raw.slice() : new Array(t.width).fill('');
   Object.keys(fields).forEach(k => { line[t.cols[k]] = safe_(fields[k]); });
   t.sh.getRange(row || t.sh.getLastRow() + 1, 1, 1, t.width).setValues([line]);
+  changed_();
 }
 
 // Text starting with = + - @ would be run as a formula; a leading ' keeps it as text.
@@ -458,7 +529,9 @@ function safe_(v) {
 }
 
 function deleteRows_(t, rows) {
+  if (!rows.length) return;
   rows.slice().sort((a, b) => b - a).forEach(r => t.sh.deleteRow(r));
+  changed_();
 }
 
 // ---------- misc ----------

@@ -61,7 +61,10 @@ function route_(body, auth) {
   switch (body.action) {
     case 'me': {
       const weeks = listWeeks_();
-      return { user: me, weeks, entries: entriesFor_(me.email, weeks) };
+      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks) };
+      // Admins land on the admin panel, so send its data now and save a second (slow) round trip.
+      if (me.is_admin && body.withOverview) result.overview = overview_();
+      return result;
     }
     case 'saveEntry':
       saveEntry_(me, body);

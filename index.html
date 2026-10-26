@@ -175,12 +175,19 @@ async function api(action, data = {}) {
   const user = auth.currentUser;
   if (!user) throw new Error("Please log in");
   const idToken = await user.getIdToken();
+  // Give up after 45 s so a stuck request can't leave the page loading forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 45000);
   let out;
   try {
-    const res = await fetch(SCRIPT_URL, { method: "POST", body: JSON.stringify({ ...data, action, idToken }) });
+    const res = await fetch(SCRIPT_URL, { method: "POST", body: JSON.stringify({ ...data, action, idToken }), signal: controller.signal });
     out = await res.json();
-  } catch {
-    throw new Error("Couldn't reach the server. Check your connection and try again.");
+  } catch (ex) {
+    throw new Error(ex.name === "AbortError"
+      ? "The server took too long to respond. Try again."
+      : "Couldn't reach the server. Check your connection and try again.");
+  } finally {
+    clearTimeout(timer);
   }
   if (out.error) throw new Error(out.error);
   return out;
@@ -200,8 +207,16 @@ const started = w => w.start <= today();
 const isCurrent = w => w.start <= today() && today() <= w.end;
 // The week happening now, or else the most recent one that has started, or else the first.
 const defaultWeek = weeks => (weeks.find(isCurrent) || weeks.filter(started).at(-1) || weeks[0])?.id;
-const loading = () => { app.innerHTML = `<p class="loading">Loading…</p>`; };
-const fatal = msg => { app.innerHTML = `<div class="card"><p class="error" style="margin:0">${esc(msg)}</p></div>`; };
+// The Apps Script can take several seconds to wake up after a quiet spell, so say so if loading drags on.
+function loading() {
+  app.innerHTML = `<p class="loading">Loading…<br><span class="slow hidden" style="font-size:13px">Still working. The server can take a few seconds to wake up.</span></p>`;
+  const hint = $(".slow", app);
+  setTimeout(() => hint.classList.remove("hidden"), 5000);
+}
+function fatal(msg) {
+  app.innerHTML = `<div class="card"><p class="error" style="margin:0 0 12px">${esc(msg)}</p><button class="small" id="retry">Try again</button></div>`;
+  $("#retry").onclick = () => location.reload();
+}
 
 // Runs fn while a button shows a busy label, so slow sheet calls don't look frozen.
 async function busy(button, label, fn) {
@@ -234,7 +249,7 @@ function render(data) {
        <button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>`
     : "";
   nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
-  const page = view === "admin" && me.is_admin ? renderAdmin() : renderStudent(data);
+  const page = view === "admin" && me.is_admin ? renderAdmin(data?.overview) : renderStudent(data);
   page.catch(ex => fatal(ex.message));
 }
 
@@ -244,7 +259,7 @@ onAuthStateChanged(auth, async user => {
   if (!user) { me = null; view = "student"; return render(); }
   loading();
   try {
-    const data = await api("me", { name: user.displayName || "" });
+    const data = await api("me", { name: user.displayName || "", withOverview: true });
     me = data.user;
     view = me.is_admin ? "admin" : "student";
     render(data);
@@ -328,9 +343,10 @@ async function renderStudent(data) {
 let adminWeek = null;
 let adminSort = "name";
 
-async function renderAdmin() {
-  loading();
-  const { weeks, students } = await api("overview");
+// `prefetched` is the overview that came with the sign-in response, when there is one.
+async function renderAdmin(prefetched) {
+  if (!prefetched) loading();
+  const { weeks, students } = prefetched || await api("overview");
   app.replaceChildren($("#tpl-admin").content.cloneNode(true));
   if (!weeks.some(w => w.id === adminWeek)) adminWeek = defaultWeek(weeks);
   $("#sort").value = adminSort;

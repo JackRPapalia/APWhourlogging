@@ -132,6 +132,7 @@
         <option value="total">Total hours</option>
       </select>
       <button class="ghost small" id="export">Export CSV</button>
+      <button class="small" id="add-people">Add people</button>
     </div>
     <div class="stat-row" id="class-stats"></div>
     <div class="table-wrap"><table id="overview"></table></div>
@@ -145,7 +146,7 @@
     <div class="toolbar" id="detail-actions"></div>
     <div id="detail-weeks"></div>
   </div>
-  <div class="card">
+  <div class="card" id="class-list">
     <h2>Class list</h2>
     <p class="muted" style="font-size:13px;margin:-6px 0 14px">Only people on this list can sign in. Adding a student to a section moves them out of the other one.</p>
     <form id="roster-form" class="roster-form">
@@ -420,6 +421,10 @@ async function renderAdmin(prefetched) {
   $("#sort").onchange = e => { adminSort = e.target.value; draw(); };
   $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(tr.dataset.user).catch(ex => alert(ex.message)); };
   $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
+  $("#add-people").onclick = () => {
+    $("#class-list").scrollIntoView({ behavior: "smooth", block: "start" });
+    $("#r-emails").focus({ preventScroll: true });
+  };
   $("#export").onclick = () => {
     const q = v => `"${String(v).replace(/"/g, '""')}"`;
     const rows = students.filter(s => !adminSection || s.section === adminSection);

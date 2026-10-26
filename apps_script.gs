@@ -295,7 +295,15 @@ function removeUser_(me, body) {
 // ---------- weeks ----------
 
 function toWeek_(r) {
-  return { id: Number(r.id), label: String(r.label || ''), start: String(r.start), end: String(r.end), auto: String(r.auto) === '1' || r.auto === true, _row: r._row };
+  return { id: Number(r.id), label: String(r.label || ''), start: toIso_(r.start), end: toIso_(r.end), auto: String(r.auto) === '1' || r.auto === true, _row: r._row };
+}
+
+// The week an hours row belongs to: the week starting on its date, or else the week that
+// contains it. Matching the start first keeps rows right even if two weeks share a day.
+function weekFor_(weeks, iso) {
+  return weeks.find(w => w.start === iso) ||
+    weeks.filter(w => w.start <= iso && iso <= w.end).sort((a, b) => (a.start < b.start ? 1 : -1))[0] ||
+    null;
 }
 
 function weekRows_(t) {
@@ -360,7 +368,7 @@ function saveWeek_(body) {
   const overlapping = weeks.filter(w => w.id !== id && w.start <= end && w.end >= start);
   // Admin-defined weeks replace auto-created ones that nobody has logged hours in yet.
   const hourRows = table_(HOURS_SHEET, HOURS_HEADERS).rows;
-  const replaceable = overlapping.filter(w => w.auto && !hourRows.some(r => r.week >= w.start && r.week <= w.end));
+  const replaceable = overlapping.filter(w => w.auto && !hourRows.some(r => toIso_(r.week) >= w.start && toIso_(r.week) <= w.end));
   const clash = overlapping.find(w => replaceable.indexOf(w) === -1);
   if (clash) fail_(`Overlaps ${clash.label || 'the week'} (${clash.start} to ${clash.end})`);
   if (editing) writeRow_(t, editing._row, { label, start, end, auto: 0 });
@@ -383,7 +391,7 @@ function hoursByUser_(weeks) {
   const out = {};
   table_(HOURS_SHEET, HOURS_HEADERS).rows.forEach(r => {
     const email = String(r.username).toLowerCase();
-    const week = weeks.find(w => w.start <= r.week && r.week <= w.end);
+    const week = weekFor_(weeks, toIso_(r.week));
     const hours = Number(r.hours);
     if (!email || !week || r.hours === '' || !isFinite(hours)) return;
     (out[email] = out[email] || {})[week.id] = { week_id: week.id, hours, description: String(r.notes) };
@@ -396,8 +404,9 @@ function entriesFor_(email, weeks) {
 }
 
 function userWeekRows_(t, email, week) {
+  const weeks = listWeeks_();
   return t.rows
-    .filter(r => String(r.username).toLowerCase() === email && r.week >= week.start && r.week <= week.end)
+    .filter(r => String(r.username).toLowerCase() === email && (weekFor_(weeks, toIso_(r.week)) || {}).id === week.id)
     .map(r => r._row);
 }
 
@@ -550,6 +559,21 @@ function tz_() {
 
 function today_() {
   return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+}
+
+// Dates typed into the sheet by hand come in many shapes; turn the common ones into
+// yyyy-mm-dd so they compare correctly as text ("2026-10-4" would sort after "2026-10-25").
+function toIso_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]' || (v && typeof v.getTime === 'function')) {
+    return Utilities.formatDate(v, tz_(), 'yyyy-MM-dd');
+  }
+  const s = String(v == null ? '' : v).trim();
+  const pad = n => String(n).padStart(2, '0');
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); // US month/day/year
+  if (m) return `${m[3]}-${pad(m[1])}-${pad(m[2])}`;
+  return s;
 }
 
 function isIsoDate_(s) {

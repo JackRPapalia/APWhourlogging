@@ -67,6 +67,7 @@
   tr.clickable { cursor: pointer; }
   tr.clickable:hover td { background: var(--accent-soft); }
   .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); margin-left: 6px; font-weight: 500; }
+  .badge.warn { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
   .zero { color: var(--muted); }
   .stat-row { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 14px; }
   .stat .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -197,7 +198,7 @@ let last = null;   // latest "me" response: { user, weeks, entries, overview? }
 let dirty = false; // someone typed since the last render; a background refresh mustn't wipe it
 const savedKey = email => `apw:v1:${email}`;
 function loadSaved(email) {
-  try { return JSON.parse(localStorage.getItem(savedKey(email))); } catch { return null; }
+  try { return fixWeeks(JSON.parse(localStorage.getItem(savedKey(email)))); } catch { return null; }
 }
 function remember(patch) {
   if (!last) return;
@@ -239,7 +240,24 @@ async function api(action, data = {}) {
     clearTimeout(timer);
   }
   if (out.error) throw new Error(out.error);
-  return out;
+  return fixWeeks(out);
+}
+
+// Dates typed into the sheet by hand may lack leading zeros ("2026-10-4") or use
+// month/day/year; normalize them so they sort and compare correctly as text.
+function fixDate(v) {
+  const s = String(v ?? "").trim(), pad = n => String(n).padStart(2, "0");
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${pad(m[1])}-${pad(m[2])}`;
+  return s;
+}
+function fixWeeks(data) {
+  const fix = weeks => weeks.map(w => ({ ...w, start: fixDate(w.start), end: fixDate(w.end) })).sort((a, b) => a.start.localeCompare(b.start));
+  if (data?.weeks) data.weeks = fix(data.weeks);
+  if (data?.overview?.weeks) data.overview.weeks = fix(data.overview.weeks);
+  return data;
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const parseDay = s => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
@@ -538,12 +556,14 @@ function setupClassList(people, sections) {
 function setupWeekEditor(weeks) {
   const form = $("#week-editor"), err = $("#week-error");
   let editing = null;
+  // Weeks added in the app can't overlap, but ones typed into the sheet can.
+  const overlaps = w => weeks.filter(o => o.id !== w.id && o.start <= w.end && o.end >= w.start);
 
   $("#weeks-table").innerHTML = weeks.length ? `
     <thead><tr><th>Week</th><th>Start</th><th>End</th><th></th></tr></thead>
     <tbody>${[...weeks].reverse().map(w => `
       <tr>
-        <td>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">current</span>' : ""}</td>
+        <td>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">current</span>' : ""}${overlaps(w).map(o => `<span class="badge warn">overlaps ${esc(weekName(o))}</span>`).join("")}</td>
         <td>${fmt(w.start, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
         <td>${fmt(w.end, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
         <td class="num"><button class="ghost small" data-edit="${w.id}">Edit</button> <button class="danger small" data-delete="${w.id}">Delete</button></td>
@@ -552,8 +572,8 @@ function setupWeekEditor(weeks) {
 
   function reset() {
     editing = null;
-    const last = weeks.at(-1);
-    const start = last ? addDays(last.end, 1) : today();
+    const lastEnd = weeks.map(w => w.end).sort().at(-1);
+    const start = lastEnd ? addDays(lastEnd, 1) : today();
     $("#w-label").value = "";
     $("#w-start").value = start;
     $("#w-end").value = addDays(start, 6);
@@ -562,6 +582,9 @@ function setupWeekEditor(weeks) {
     err.textContent = "";
   }
   reset();
+  if (weeks.some(w => overlaps(w).length)) {
+    err.textContent = "Some weeks share days. Edit them so each week ends the day before the next one starts (e.g. Sunday to Saturday).";
+  }
 
   $("#w-start").onchange = () => { if (!editing && $("#w-start").value) $("#w-end").value = addDays($("#w-start").value, 6); };
   $("#w-cancel").onclick = reset;

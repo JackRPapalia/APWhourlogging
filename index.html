@@ -80,6 +80,10 @@
   .roster-lists ul { list-style: none; margin: 0; padding: 0; font-size: 14px; }
   .roster-lists li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
   .roster-lists li span { overflow: hidden; text-overflow: ellipsis; }
+  /* Keep the credits at the bottom of the window even when the page is short. */
+  body { min-height: 100vh; display: flex; flex-direction: column; }
+  main { flex: 1; width: 100%; }
+  .credits { text-align: center; color: var(--muted); font-size: 12px; padding: 8px 16px 24px; }
   .loading { text-align: center; color: var(--muted); padding: 60px 0; }
   .hidden { display: none !important; }
   @media (max-width: 640px) {
@@ -103,6 +107,8 @@
 </header>
 
 <main id="app"><p class="loading">Loading…</p></main>
+
+<footer class="credits">Created by Jack Papalia ’27, data sourcing inspired by Leyna Director ’27</footer>
 
 <template id="tpl-auth">
   <div class="card auth">

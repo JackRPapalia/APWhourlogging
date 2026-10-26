@@ -6,12 +6,17 @@
  * Execute as: Me, Who has access: Anyone). See README.md for the full steps.
  *
  * Every request must carry a Firebase ID token, which is checked with Google before
- * anything is read or written. Data lives in three tabs:
+ * anything is read or written. Only people listed on a roster tab can sign in:
+ *   - "Admins", "Section 1", "Section 2":  one email per row in column A (any header row,
+ *                     blank rows and "mailto:" links are fine). Admins manage the class;
+ *                     a student's section is the tab they're on.
+ * Other data:
  *   - the first tab:  Username, Name, Week, Hours, Notes  (one row per student per week;
  *                     Username is the student's email, Week is the week's start date)
- *   - "Users":        Email, Name, Role, Joined           (created automatically)
+ *   - "Users":        Email, Name, Joined                 (created automatically; names
+ *                     come from people's Google accounts the first time they sign in)
  *   - "Weeks":        Id, Label, Start, End, Auto         (created automatically)
- * The first person to sign in becomes an admin.
+ * If the Admins tab is empty, the first person to sign in is added to it.
  */
 
 // Your Firebase project's Web API key (Firebase console → Project settings → General → Web API key).
@@ -19,10 +24,12 @@ const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
+const ADMINS_SHEET = 'Admins';
+const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
 const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes'];
-const USERS_HEADERS = ['Email', 'Name', 'Role', 'Joined'];
+const USERS_HEADERS = ['Email', 'Name', 'Joined'];
 const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto'];
 
 function doGet() {
@@ -86,10 +93,13 @@ function route_(body, auth) {
       requireAdmin();
       deleteWeek_(body.id);
       return { weeks: listWeeks_() };
-    case 'setRole':
+    case 'addUsers':
       requireAdmin();
-      setRole_(me, body);
-      return { ok: true };
+      return Object.assign(addUsers_(body), { overview: overview_() });
+    case 'removeUser':
+      requireAdmin();
+      removeUser_(me, body);
+      return { overview: overview_() };
   }
   fail_('Unknown action');
 }
@@ -116,31 +126,121 @@ function verifyToken_(idToken) {
   return auth;
 }
 
+// Lets the user in only if they're on a roster tab, and records their name the first time.
 function registerUser_(auth, name) {
+  let access = access_(auth.email);
+  if (!access.is_admin && !access.section && rosterEmails_(ADMINS_SHEET).length === 0) {
+    addToRoster_(ADMINS_SHEET, auth.email); // nobody is an admin yet, so the first person in becomes one
+    access = access_(auth.email);
+  }
+  if (!access.is_admin && !access.section) {
+    fail_(`${auth.email} isn't on the class list yet. Ask your teacher to add you, then sign in again.`);
+  }
   const t = table_(USERS_SHEET, USERS_HEADERS);
   const row = t.rows.find(r => String(r.email).toLowerCase() === auth.email);
   const cleanName = String(name || auth.name || '').trim().slice(0, 80);
+  let display = row ? String(row.name || '') : '';
   if (!row) {
-    const role = t.rows.some(r => r.email) ? 'student' : 'admin';
-    const display = cleanName || auth.email.split('@')[0];
-    writeRow_(t, null, { email: auth.email, name: display, role, joined: today_() });
-    return { email: auth.email, name: display, is_admin: role === 'admin' };
+    display = cleanName || auth.email.split('@')[0];
+    writeRow_(t, null, { email: auth.email, name: display, joined: today_() });
+  } else if (!display && cleanName) {
+    display = cleanName;
+    writeRow_(t, row._row, { name: cleanName });
   }
-  if (!row.name && cleanName) writeRow_(t, row._row, { name: cleanName });
-  return { email: auth.email, name: String(row.name || cleanName || auth.email), is_admin: isAdminRow_(row) };
+  return { email: auth.email, name: display || auth.email, is_admin: access.is_admin, section: access.section };
 }
 
-function isAdminRow_(row) {
-  return String(row.role).toLowerCase() === 'admin';
+// ---------- rosters ----------
+
+function rosterSheet_(name) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheets().find(s => s.getName().trim().toLowerCase() === name.toLowerCase());
+  if (sh) return sh;
+  const created = ss.insertSheet(name, ss.getNumSheets());
+  created.getRange(1, 1).setValue('Email').setFontWeight('bold');
+  created.setFrozenRows(1);
+  return created;
 }
 
-function setRole_(me, body) {
-  const email = String(body.email || '').toLowerCase();
-  if (email === me.email) fail_("You can't change your own role");
-  const t = table_(USERS_SHEET, USERS_HEADERS);
-  const row = t.rows.find(r => String(r.email).toLowerCase() === email);
-  if (!row) fail_('User not found');
-  writeRow_(t, row._row, { role: body.is_admin ? 'admin' : 'student' });
+function cleanEmail_(v) {
+  return String(v || '').trim().replace(/^mailto:/i, '').trim().toLowerCase();
+}
+
+function isEmail_(s) {
+  return /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(s);
+}
+
+// [{ email, row }] for every email in column A of a roster tab; headers and blanks are skipped.
+function rosterRows_(name) {
+  const sh = rosterSheet_(name);
+  const last = sh.getLastRow();
+  if (!last) return [];
+  return sh.getRange(1, 1, last, 1).getValues()
+    .map((r, i) => ({ email: cleanEmail_(r[0]), row: i + 1 }))
+    .filter(r => isEmail_(r.email));
+}
+
+function rosterEmails_(name) {
+  return rosterRows_(name).map(r => r.email);
+}
+
+function addToRoster_(name, email) {
+  const sh = rosterSheet_(name);
+  sh.getRange(sh.getLastRow() + 1, 1).setValue(email);
+}
+
+function removeFromRoster_(name, email) {
+  const sh = rosterSheet_(name);
+  rosterRows_(name).filter(r => r.email === email).map(r => r.row).sort((a, b) => b - a).forEach(r => sh.deleteRow(r));
+}
+
+// { is_admin, section } for one email, from the roster tabs.
+function access_(email) {
+  return {
+    is_admin: rosterEmails_(ADMINS_SHEET).indexOf(email) !== -1,
+    section: SECTIONS.find(s => rosterEmails_(s).indexOf(email) !== -1) || '',
+  };
+}
+
+// Adds emails to Admins or a section. A student can only be in one section, so adding
+// them to a section moves them out of the other one.
+function addUsers_(body) {
+  const group = String(body.group || '');
+  if (group !== 'admin' && SECTIONS.indexOf(group) === -1) fail_('Pick Section 1, Section 2 or Admin');
+  const emails = [...new Set((Array.isArray(body.emails) ? body.emails : String(body.emails || '').split(/[\s,;]+/)).map(cleanEmail_).filter(Boolean))];
+  if (!emails.length) fail_('Enter at least one email address');
+  if (emails.length > 300) fail_('Add at most 300 emails at a time');
+  const invalid = emails.filter(e => !isEmail_(e));
+  if (invalid.length) fail_(`These don't look like email addresses: ${invalid.slice(0, 5).join(', ')}`);
+  const tab = group === 'admin' ? ADMINS_SHEET : group;
+  const existing = rosterEmails_(tab);
+  const others = {}; // other section's name -> its emails, read once
+  if (group !== 'admin') SECTIONS.filter(s => s !== group).forEach(s => { others[s] = rosterEmails_(s); });
+  const result = { added: [], moved: [], already: [] };
+  emails.forEach(email => {
+    if (existing.indexOf(email) !== -1) return result.already.push(email);
+    if (group !== 'admin') {
+      const other = Object.keys(others).find(s => others[s].indexOf(email) !== -1);
+      if (other) { removeFromRoster_(other, email); result.moved.push(email); } else result.added.push(email);
+    } else {
+      result.added.push(email);
+    }
+    addToRoster_(tab, email);
+  });
+  return result;
+}
+
+function removeUser_(me, body) {
+  const email = cleanEmail_(body.email);
+  const group = String(body.group || '');
+  if (group === 'admin') {
+    if (email === me.email) fail_("You can't remove yourself from Admins");
+    removeFromRoster_(ADMINS_SHEET, email);
+  } else if (SECTIONS.indexOf(group) !== -1) {
+    removeFromRoster_(group, email);
+  } else {
+    fail_('Unknown group');
+  }
 }
 
 // ---------- weeks ----------
@@ -264,29 +364,43 @@ function deleteEntry_(me, body) {
 
 // ---------- admin views ----------
 
+// Everyone on a roster, with their hours. Students are the people in a section;
+// admins who aren't in a section are included too, so the class list can show them.
 function overview_() {
   const weeks = listWeeks_();
   const hours = hoursByUser_(weeks);
-  const students = table_(USERS_SHEET, USERS_HEADERS).rows.filter(r => r.email).map(r => {
-    const email = String(r.email).toLowerCase();
+  const names = {};
+  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || ''); });
+  const admins = rosterEmails_(ADMINS_SHEET);
+  const people = {};
+  const person = email => (people[email] = people[email] || { email, section: '', is_admin: false });
+  SECTIONS.forEach(s => rosterEmails_(s).forEach(email => { if (!person(email).section) person(email).section = s; }));
+  admins.forEach(email => { person(email).is_admin = true; });
+  const students = Object.keys(people).map(email => {
     const per = {};
     let total = 0;
     Object.keys(hours[email] || {}).forEach(id => {
       per[id] = hours[email][id].hours;
       total += hours[email][id].hours;
     });
-    return { email, name: String(r.name || email), is_admin: isAdminRow_(r), hours: per, total: Math.round(total * 100) / 100 };
+    return Object.assign(people[email], {
+      name: names[email] || email,
+      signed_in: email in names,
+      hours: per,
+      total: Math.round(total * 100) / 100,
+    });
   });
-  return { weeks, students };
+  return { weeks, students, sections: SECTIONS };
 }
 
 function userEntries_(email) {
-  email = String(email || '').toLowerCase();
+  email = cleanEmail_(email);
+  const access = access_(email);
+  if (!access.is_admin && !access.section) fail_('User not found');
   const row = table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === email);
-  if (!row) fail_('User not found');
   const weeks = listWeeks_();
   return {
-    user: { email, name: String(row.name || email), is_admin: isAdminRow_(row) },
+    user: { email, name: String((row && row.name) || email), is_admin: access.is_admin, section: access.section },
     weeks,
     entries: entriesFor_(email, weeks),
   };

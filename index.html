@@ -67,12 +67,19 @@
   .stat .l { font-size: 12px; color: var(--muted); }
   .week-editor { display: grid; grid-template-columns: 1fr 160px 160px auto; gap: 12px; align-items: end; margin-top: 16px; }
   .week-editor .btns { display: flex; gap: 6px; }
+  .roster-form { display: grid; grid-template-columns: 1fr 160px auto; gap: 12px; align-items: end; }
+  .roster-lists { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 8px; }
+  .roster-lists h3 { font-size: 14px; margin: 0 0 6px; }
+  .roster-lists ul { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+  .roster-lists li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+  .roster-lists li span { overflow: hidden; text-overflow: ellipsis; }
   .loading { text-align: center; color: var(--muted); padding: 60px 0; }
   .hidden { display: none !important; }
   @media (max-width: 640px) {
     .week-form { grid-template-columns: 1fr; }
     .week-editor { grid-template-columns: 1fr 1fr; }
     .week-editor .label-field, .week-editor .btns { grid-column: 1 / -1; }
+    .roster-form, .roster-lists { grid-template-columns: 1fr; }
     header { flex-wrap: wrap; }
   }
 </style>
@@ -115,6 +122,8 @@
     <div class="toolbar">
       <label for="wk-select">Week</label>
       <select id="wk-select"></select>
+      <label for="section">Section</label>
+      <select id="section"></select>
       <span class="grow"></span>
       <label for="sort">Sort</label>
       <select id="sort">
@@ -135,6 +144,17 @@
     </div>
     <div class="toolbar" id="detail-actions"></div>
     <div id="detail-weeks"></div>
+  </div>
+  <div class="card">
+    <h2>Class list</h2>
+    <p class="muted" style="font-size:13px;margin:-6px 0 14px">Only people on this list can sign in. Adding a student to a section moves them out of the other one.</p>
+    <form id="roster-form" class="roster-form">
+      <div><label for="r-emails">Emails (one per line, or separated by commas)</label><textarea id="r-emails" rows="3" required placeholder="ab1234@trevor.org"></textarea></div>
+      <div><label for="r-group">Add to</label><select id="r-group"></select></div>
+      <div><button type="submit" id="r-submit">Add</button></div>
+    </form>
+    <div class="error" id="roster-msg"></div>
+    <div class="roster-lists" id="roster-lists"></div>
   </div>
   <div class="card">
     <h2>Weeks</h2>
@@ -214,8 +234,11 @@ function loading() {
   setTimeout(() => hint.classList.remove("hidden"), 5000);
 }
 function fatal(msg) {
-  app.innerHTML = `<div class="card"><p class="error" style="margin:0 0 12px">${esc(msg)}</p><button class="small" id="retry">Try again</button></div>`;
+  app.innerHTML = `<div class="card"><p class="error" style="margin:0 0 12px">${esc(msg)}</p>
+    <button class="small" id="retry">Try again</button>
+    ${auth.currentUser ? `<button class="ghost small" id="switch">Use a different account</button>` : ""}</div>`;
   $("#retry").onclick = () => location.reload();
+  if (auth.currentUser) $("#switch").onclick = () => signOut(auth);
 }
 
 // Runs fn while a button shows a busy label, so slow sheet calls don't look frozen.
@@ -242,7 +265,7 @@ function authMessage(ex) {
 function render(data) {
   $("#topbar").classList.toggle("hidden", !me);
   if (!me) return renderAuth();
-  $("#who").textContent = `${me.name} (${me.email})`;
+  $("#who").textContent = `${me.name} (${me.email})${me.section && !me.is_admin ? ` · ${me.section}` : ""}`;
   const nav = $("#nav");
   nav.innerHTML = me.is_admin
     ? `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
@@ -342,14 +365,20 @@ async function renderStudent(data) {
 // ---------- admin ----------
 let adminWeek = null;
 let adminSort = "name";
+let adminSection = "";
 
 // `prefetched` is the overview that came with the sign-in response, when there is one.
 async function renderAdmin(prefetched) {
   if (!prefetched) loading();
-  const { weeks, students } = prefetched || await api("overview");
+  const overview = prefetched || await api("overview");
+  const { weeks, students: people } = overview;
+  const sections = overview.sections || ["Section 1", "Section 2"];
+  const students = people.filter(s => s.section); // admins without a section don't log hours
   app.replaceChildren($("#tpl-admin").content.cloneNode(true));
   if (!weeks.some(w => w.id === adminWeek)) adminWeek = defaultWeek(weeks);
+  if (adminSection && !sections.includes(adminSection)) adminSection = "";
   $("#sort").value = adminSort;
+  $("#section").innerHTML = `<option value="">All sections</option>` + sections.map(n => `<option ${n === adminSection ? "selected" : ""}>${esc(n)}</option>`).join("");
 
   function draw() {
     const sel = $("#wk-select");
@@ -358,49 +387,96 @@ async function renderAdmin(prefetched) {
       : `<option>No weeks set up yet</option>`;
     sel.disabled = !weeks.length;
 
+    const shown = students.filter(s => !adminSection || s.section === adminSection);
     const wkHours = s => s.hours[adminWeek] || 0;
-    const sorted = [...students].sort((a, b) =>
+    const sorted = [...shown].sort((a, b) =>
       adminSort === "week" ? wkHours(b) - wkHours(a) :
       adminSort === "total" ? b.total - a.total :
       a.name.localeCompare(b.name));
-    const learners = students.filter(s => !s.is_admin);
-    const logged = learners.filter(s => wkHours(s) > 0).length;
-    const weekTotal = learners.reduce((t, s) => t + wkHours(s), 0);
+    const logged = shown.filter(s => wkHours(s) > 0).length;
+    const weekTotal = shown.reduce((t, s) => t + wkHours(s), 0);
     $("#class-stats").innerHTML =
-      stat(learners.length, "Students") +
-      stat(`${logged}/${learners.length}`, "Logged this week") +
+      stat(shown.length, "Students") +
+      stat(`${logged}/${shown.length}`, "Logged this week") +
       stat(hrs(weekTotal), "Class hours this week") +
       stat(logged ? hrs(weekTotal / logged) : "0", "Average per student who logged");
 
     $("#overview").innerHTML = `
-      <thead><tr><th>Student</th>
+      <thead><tr><th>Student</th>${adminSection ? "" : "<th>Section</th>"}
         ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
         <th class="num">Total</th></tr></thead>
       <tbody>${sorted.map(s => `
         <tr class="clickable" data-user="${esc(s.email)}">
-          <td>${esc(s.name)} <span class="muted">${esc(s.email)}</span>${s.is_admin ? '<span class="badge">admin</span>' : ""}</td>
+          <td>${s.signed_in ? esc(s.name) + " " : ""}<span class="muted">${esc(s.email)}</span>${s.signed_in ? "" : '<span class="badge">not signed in yet</span>'}</td>
+          ${adminSection ? "" : `<td>${esc(s.section)}</td>`}
           ${weeks.map(w => { const v = s.hours[w.id] || 0; return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}</td>`; }).join("")}
           <td class="num"><strong>${hrs(s.total)}</strong></td>
-        </tr>`).join("") || `<tr><td colspan="${weeks.length + 2}" class="muted">No accounts yet.</td></tr>`}
+        </tr>`).join("") || `<tr><td colspan="${weeks.length + 3}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
       </tbody>`;
   }
 
   $("#wk-select").onchange = e => { adminWeek = Number(e.target.value); draw(); };
+  $("#section").onchange = e => { adminSection = e.target.value; draw(); };
   $("#sort").onchange = e => { adminSort = e.target.value; draw(); };
   $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(tr.dataset.user).catch(ex => alert(ex.message)); };
   $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
   $("#export").onclick = () => {
     const q = v => `"${String(v).replace(/"/g, '""')}"`;
-    const lines = [["Name", "Email", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
-    for (const s of students.filter(s => !s.is_admin)) lines.push([s.name, s.email, ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
+    const rows = students.filter(s => !adminSection || s.section === adminSection);
+    const lines = [["Name", "Email", "Section", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
+    for (const s of rows) lines.push([s.signed_in ? s.name : "", s.email, s.section, ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
-    a.download = `apw-hours-${today()}.csv`;
+    a.download = `apw-hours-${adminSection ? adminSection.replace(/\s+/g, "-").toLowerCase() + "-" : ""}${today()}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
   draw();
+  setupClassList(people, sections);
   setupWeekEditor(weeks);
+}
+
+function setupClassList(people, sections) {
+  const msg = $("#roster-msg");
+  const groups = [{ key: "admin", title: "Admins", members: people.filter(p => p.is_admin) },
+    ...sections.map(n => ({ key: n, title: n, members: people.filter(p => p.section === n) }))];
+  // Sections first so a pasted class list doesn't land in Admins by default.
+  $("#r-group").innerHTML = [...groups.slice(1), groups[0]].map(g => `<option value="${esc(g.key)}">${g.key === "admin" ? "Admin" : esc(g.title)}</option>`).join("");
+  $("#roster-lists").innerHTML = groups.map(g => `
+    <div>
+      <h3>${esc(g.title)} <span class="muted" style="font-weight:400">(${g.members.length})</span></h3>
+      <ul>${g.members.sort((a, b) => a.email.localeCompare(b.email)).map(p => `
+        <li><span title="${esc(p.email)}">${esc(p.email)}</span>
+          ${g.key === "admin" && p.email === me.email ? '<span class="muted" style="font-size:12px">you</span>'
+            : `<button class="danger small" data-remove="${esc(p.email)}" data-group="${esc(g.key)}" aria-label="Remove ${esc(p.email)}">Remove</button>`}</li>`).join("")
+        || '<li><span class="muted">Nobody yet</span></li>'}</ul>
+    </div>`).join("");
+
+  const list = (label, emails) => emails.length ? `${label}: ${emails.join(", ")}` : "";
+  $("#roster-form").onsubmit = async e => {
+    e.preventDefault();
+    msg.className = "error";
+    msg.textContent = "";
+    const group = $("#r-group").value;
+    try {
+      const r = await busy($("#r-submit"), "Adding…", () => api("addUsers", { emails: $("#r-emails").value, group }));
+      await renderAdmin(r.overview);
+      const done = $("#roster-msg");
+      done.className = "error ok";
+      done.textContent = [list("Added", r.added), list("Moved from the other section", r.moved), list("Already there", r.already)].filter(Boolean).join(". ");
+      $("#roster-msg").scrollIntoView({ block: "center" });
+    } catch (ex) { msg.textContent = ex.message; }
+  };
+  $("#roster-lists").onclick = async e => {
+    const email = e.target.dataset.remove, group = e.target.dataset.group;
+    if (!email) return;
+    const where = group === "admin" ? "Admins" : group;
+    if (!confirm(`Remove ${email} from ${where}?${group === "admin" ? "" : " They won't be able to sign in unless they're on another list. Their logged hours stay in the sheet."}`)) return;
+    try {
+      const r = await busy(e.target, "Removing…", () => api("removeUser", { email, group }));
+      await renderAdmin(r.overview);
+    } catch (ex) { msg.className = "error"; msg.textContent = ex.message; }
+  };
 }
 
 function setupWeekEditor(weeks) {
@@ -472,19 +548,7 @@ async function showStudent(email) {
   $("#detail-weeks").innerHTML = "";
   const { user, weeks, entries } = await api("userEntries", { email });
   $("#detail-title").textContent = `${user.name} — ${hrs(Object.values(entries).reduce((s, e) => s + e.hours, 0))} h total`;
-  if (user.email !== me.email) {
-    $("#detail-actions").innerHTML = `
-      <button class="ghost small" id="toggle-admin">${user.is_admin ? "Remove admin" : "Make admin"}</button>
-      <span class="muted" id="detail-msg" style="font-size:13px"></span>`;
-    $("#toggle-admin").onclick = async e => {
-      if (!confirm(`${user.is_admin ? "Remove admin access from" : "Give admin access to"} ${user.name}?`)) return;
-      try {
-        await busy(e.target, "Saving…", () => api("setRole", { email: user.email, is_admin: !user.is_admin }));
-        await renderAdmin();
-        await showStudent(email);
-      } catch (ex) { $("#detail-msg").textContent = ex.message; }
-    };
-  }
+  $("#detail-actions").innerHTML = `<span class="muted" style="font-size:13px">${esc(user.email)}${user.section ? ` · ${esc(user.section)}` : ""}${user.is_admin ? " · admin" : ""}</span>`;
   const shown = weeks.filter(started).reverse();
   $("#detail-weeks").innerHTML = shown.map(w => {
     const e = entries[w.id];

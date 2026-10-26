@@ -102,6 +102,14 @@
   .closed-entry { display: grid; grid-template-columns: 120px 1fr; gap: 12px; font-size: 14px; }
   .late { color: var(--danger); }
   .detail-edit { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: start; margin-top: 8px; }
+  .check { display: flex; gap: 8px; align-items: center; grid-column: 1 / -1; font-size: 14px; color: var(--text); margin: 0; }
+  .check input { width: auto; }
+  .bulk { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+  .bulk summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+  .bulk-form { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 12px; }
+  .bulk td input[type=checkbox] { width: auto; }
+  th .sub.noclass, .noclass-cell { color: var(--muted); font-style: italic; }
+  .excused { color: var(--muted); font-style: italic; }
   .loading { text-align: center; color: var(--muted); padding: 60px 0; }
   .hidden { display: none !important; }
   @media (max-width: 640px) {
@@ -109,6 +117,7 @@
     .week-editor { grid-template-columns: 1fr 1fr; }
     .week-editor .label-field, .week-editor .btns { grid-column: 1 / -1; }
     .roster-form, .roster-lists, .closed-entry, .detail-edit { grid-template-columns: 1fr; }
+    .bulk-form { grid-template-columns: 1fr 1fr; }
     header { flex-wrap: wrap; }
   }
 </style>
@@ -219,8 +228,21 @@
       <div><label for="w-start">Start date</label><input id="w-start" type="date" required></div>
       <div><label for="w-end">End date</label><input id="w-end" type="date" required></div>
       <div class="btns"><button type="submit" id="w-submit">Add week</button><button type="button" class="ghost hidden" id="w-cancel">Cancel</button></div>
+      <label class="check"><input type="checkbox" id="w-noclass"> No class this week (e.g. a break). Students won't be asked to log hours.</label>
     </form>
     <div class="error" id="week-error"></div>
+    <details class="bulk" id="bulk">
+      <summary>Set up several weeks at once</summary>
+      <div class="bulk-form">
+        <div><label for="b-start">First day</label><input id="b-start" type="date"></div>
+        <div><label for="b-count">Number of weeks</label><input id="b-count" type="number" min="1" max="60" value="10"></div>
+        <div><label for="b-len">Each week lasts</label><select id="b-len"><option value="7">7 days</option><option value="5">5 days (weekdays)</option><option value="14">14 days</option></select></div>
+        <div><label for="b-num">Number from</label><input id="b-num" type="number" min="1" max="999" value="1"></div>
+      </div>
+      <p class="muted" style="font-size:13px;margin:10px 0 6px">Tick <strong>No class</strong> for breaks. Class weeks are numbered in order and breaks are labeled "Break". You can rename any week later.</p>
+      <div class="table-wrap"><table id="bulk-preview"></table></div>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:10px"><button type="button" id="b-create">Create weeks</button><span class="error" id="bulk-msg" style="margin:0"></span></div>
+    </details>
   </div>
 </template>
 
@@ -490,9 +512,13 @@ async function renderStudent(data) {
   $("#my-stats").innerHTML =
     stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${esc(weekName(cur))})` : "No week in progress") +
     stat(hrs(total), "Total hours") +
-    stat(`${Object.keys(entries).length}/${open.length}`, "Weeks logged");
+    // No-class weeks and weeks you're excused from don't count toward "weeks logged".
+    stat(`${open.filter(w => entries[w.id]?.hours > 0).length}/${open.filter(w => !w.no_class && !entries[w.id]?.excused).length}`, "Weeks logged");
 
-  drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, { selected: cur?.id });
+  drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, {
+    selected: cur?.id,
+    tooltip: (w, v) => w.no_class && !v ? `${weekName(w)}: no class` : entries[w.id]?.excused ? `${weekName(w)}: excused` : `${weekName(w)}: ${hrs(v)} h`,
+  });
 
   const list = $("#my-weeks");
   if (!open.length) {
@@ -503,24 +529,30 @@ async function renderStudent(data) {
     const e = entries[w.id];
     const head = `
       <div class="week-head">
-        <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}${closedForMe(w) ? '<span class="badge warn">closed</span>' : ""}</strong>
-        <span class="muted" style="font-size:13px">${range(w)}${w.due && !closedForMe(w) ? ` · due ${dueText(w)}` : ""}</span>
+        <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}${w.no_class ? '<span class="badge">no class</span>' : ""}${e?.excused ? '<span class="badge">excused</span>' : ""}${closedForMe(w) ? '<span class="badge warn">closed</span>' : ""}</strong>
+        <span class="muted" style="font-size:13px">${range(w)}${w.due && !closedForMe(w) && !w.no_class ? ` · due ${dueText(w)}` : ""}</span>
       </div>`;
-    if (closedForMe(w)) {
+    const excuseNote = e?.excused ? `<p class="excused" style="margin:0 0 10px;font-size:14px">Your teacher excused you from this week${e.description ? ` (${esc(e.description)})` : ""}.${closedForMe(w) ? "" : " If you did some work anyway, you can still log it."}</p>` : "";
+    if (w.no_class && !e) {
+      return `<div class="week">${head}<p class="muted" style="margin:0;font-size:14px">No class this week, so there's nothing to log.</p></div>`;
+    }
+    if (closedForMe(w) || (w.no_class && !me?.is_admin)) {
       return `<div class="week">${head}
-        ${e ? `<div class="closed-entry"><strong>${hrs(e.hours)} h</strong><div class="desc">${esc(e.description)}</div></div>`
-            : `<p class="muted" style="margin:0;font-size:14px">Not logged. This week closed on ${dueText(w)}; ask your teacher if you need to add hours.</p>`}
+        ${e?.excused ? excuseNote
+          : e ? `<div class="closed-entry"><strong>${hrs(e.hours)} h</strong><div class="desc">${esc(e.description)}</div></div>`
+          : `<p class="muted" style="margin:0;font-size:14px">Not logged. This week closed on ${dueText(w)}; ask your teacher if you need to add hours.</p>`}
       </div>`;
     }
+    const logged = e && !e.excused ? e : null; // an excuse isn't hours to edit
     return `
-    <form class="week" data-week="${w.id}">${head}
+    <form class="week" data-week="${w.id}">${head}${excuseNote}
       <div class="week-form">
-        <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" required></div>
-        <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${e ? esc(e.description) : ""}</textarea></div>
+        <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${logged ? logged.hours : ""}" required></div>
+        <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${logged ? esc(logged.description) : ""}</textarea></div>
         <div class="actions">
-          <button type="submit" class="small">${e ? "Update" : "Save"}</button>
-          ${e ? `<button type="button" class="danger small" data-clear>Clear</button>` : ""}
-          <span class="status ${e ? "ok" : "muted"}">${e ? "Saved" : "Not logged yet"}</span>
+          <button type="submit" class="small">${logged ? "Update" : "Save"}</button>
+          ${logged ? `<button type="button" class="danger small" data-clear>Clear</button>` : ""}
+          <span class="status ${logged ? "ok" : "muted"}">${logged ? "Saved" : e?.excused ? "Excused" : "Not logged yet"}</span>
         </div>
       </div>
     </form>`;
@@ -582,17 +614,19 @@ async function renderAdmin(prefetched) {
       adminSort === "total" ? b.total - a.total :
       adminSort === "login" ? (b.last_login || 0) - (a.last_login || 0) :
       a.name.localeCompare(b.name));
-    const logged = shown.filter(s => wkHours(s) > 0).length;
+    const selWeek = weeks.find(w => w.id === adminWeek);
+    const expected = selWeek?.no_class ? [] : shown.filter(s => !s.entries?.[adminWeek]?.excused);
+    const logged = expected.filter(s => wkHours(s) > 0).length;
     const weekTotal = shown.reduce((t, s) => t + wkHours(s), 0);
     $("#class-stats").innerHTML =
       stat(shown.length, "Students") +
-      stat(`${logged}/${shown.length}`, "Logged this week") +
+      stat(selWeek?.no_class ? "no class" : `${logged}/${expected.length}`, "Logged this week") +
       stat(hrs(weekTotal), "Class hours this week") +
       stat(logged ? hrs(weekTotal / logged) : "0", "Average per student who logged");
 
     $("#overview").innerHTML = `
       <thead><tr><th>Student</th>${adminSection ? "" : "<th>Section</th>"}<th>Last sign-in</th>
-        ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
+        ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.no_class ? '<span class="sub noclass">no class</span>' : w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
         <th class="num">Total</th></tr></thead>
       <tbody>${sorted.map(s => `
         <tr class="clickable" data-user="${esc(s.email)}">
@@ -600,8 +634,10 @@ async function renderAdmin(prefetched) {
           ${adminSection ? "" : `<td>${esc(s.section)}</td>`}
           <td>${lastSeen(s)}</td>
           ${weeks.map(w => {
-            const v = s.hours[w.id] || 0, late = s.entries?.[w.id]?.late;
-            return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}${late ? '<span class="late" title="Logged after the week ended" aria-label="logged late"> •</span>' : ""}</td>`;
+            const v = s.hours[w.id] || 0, e = s.entries?.[w.id], cls = `num ${w.id === adminWeek ? "current" : ""}`;
+            if (e?.excused) return `<td class="${cls} excused" title="Excused${e.description ? ": " + esc(e.description) : ""}">ex</td>`;
+            if (!v && w.no_class) return `<td class="${cls} noclass-cell" title="No class">·</td>`;
+            return `<td class="${cls} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}${e?.late ? '<span class="late" title="Logged after the week ended" aria-label="logged late"> •</span>' : ""}</td>`;
           }).join("")}
           <td class="num"><strong>${hrs(s.total)}</strong></td>
         </tr>`).join("") || `<tr><td colspan="${weeks.length + 4}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
@@ -612,7 +648,7 @@ async function renderAdmin(prefetched) {
     $("#chart-scope").textContent = adminSection ? `· ${adminSection}` : "· all sections";
     drawWeekChart($("#class-chart"), weeks, sum, {
       selected: adminWeek,
-      tooltip: (w, v) => `${weekName(w)}: ${hrs(v)} h from ${count(w)} of ${shown.length} students`,
+      tooltip: (w, v) => w.no_class && !v ? `${weekName(w)}: no class` : `${weekName(w)}: ${hrs(v)} h from ${count(w)} of ${shown.length} students`,
       onPick: id => { adminWeek = id; draw(); },
     });
     drawMissing(weeks.find(w => w.id === adminWeek), shown);
@@ -649,7 +685,8 @@ async function renderAdmin(prefetched) {
 function drawMissing(week, shown) {
   const box = $("#missing");
   if (!week || !started(week)) { box.innerHTML = ""; return; }
-  const missing = shown.filter(s => !(s.hours[week.id] > 0));
+  if (week.no_class) { box.innerHTML = `<span class="muted">${esc(weekName(week))} is a no-class week, so no hours are expected.</span>`; return; }
+  const missing = shown.filter(s => !(s.hours[week.id] > 0) && !s.entries?.[week.id]?.excused);
   if (!missing.length) {
     box.innerHTML = `<span class="ok">Everyone shown has logged hours for ${esc(weekName(week))}.</span>`;
     return;
@@ -743,7 +780,7 @@ function setupWeekEditor(weeks) {
     <thead><tr><th>Week</th><th>Start</th><th>End</th><th>Students can edit until</th><th></th></tr></thead>
     <tbody>${[...weeks].reverse().map(w => `
       <tr>
-        <td>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">current</span>' : ""}${overlaps(w).map(o => `<span class="badge warn">overlaps ${esc(weekName(o))}</span>`).join("")}</td>
+        <td>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">current</span>' : ""}${w.no_class ? '<span class="badge">no class</span>' : ""}${overlaps(w).map(o => `<span class="badge warn">overlaps ${esc(weekName(o))}</span>`).join("")}</td>
         <td>${fmt(w.start, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
         <td>${fmt(w.end, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
         <td>${w.due ? `${dueText(w)}${isClosed(w) ? ' <span class="muted">(closed)</span>' : ""}` : '<span class="muted">no deadline</span>'}</td>
@@ -756,6 +793,7 @@ function setupWeekEditor(weeks) {
     const lastEnd = weeks.map(w => w.end).sort().at(-1);
     const start = lastEnd ? addDays(lastEnd, 1) : today();
     $("#w-label").value = "";
+    $("#w-noclass").checked = false;
     $("#w-start").value = start;
     $("#w-end").value = addDays(start, 6);
     $("#w-submit").textContent = "Add week";
@@ -774,6 +812,7 @@ function setupWeekEditor(weeks) {
     if (editId) {
       editing = weeks.find(w => w.id === editId);
       $("#w-label").value = editing.label;
+      $("#w-noclass").checked = !!editing.no_class;
       $("#w-start").value = editing.start;
       $("#w-end").value = editing.end;
       $("#w-submit").textContent = "Save changes";
@@ -792,12 +831,66 @@ function setupWeekEditor(weeks) {
   form.onsubmit = async e => {
     e.preventDefault();
     err.textContent = "";
-    const body = { id: editing?.id, label: $("#w-label").value, start: $("#w-start").value, end: $("#w-end").value };
+    const body = { id: editing?.id, label: $("#w-label").value, start: $("#w-start").value, end: $("#w-end").value, no_class: $("#w-noclass").checked };
     try {
       const r = await busy($("#w-submit"), "Saving…", () => api("saveWeek", body));
       renderAdmin(r.overview).catch(ex => fatal(ex.message));
     } catch (ex) { err.textContent = ex.message; }
   };
+  setupBulkWeeks(weeks);
+}
+
+// "Set up several weeks at once": a live preview of consecutive weeks, with breaks ticked off.
+function setupBulkWeeks(weeks) {
+  const msg = $("#bulk-msg");
+  const lastEnd = weeks.map(w => w.end).sort().at(-1);
+  const numbered = weeks.map(w => Number((/^week\s+(\d+)$/i.exec(w.label) || [])[1])).filter(Boolean);
+  $("#b-start").value = lastEnd ? addDays(lastEnd, 1) : today();
+  $("#b-num").value = numbered.length ? Math.max(...numbered) + 1 : 1;
+  const breaks = new Set(); // positions in the preview ticked "No class"
+
+  function planned() {
+    const first = $("#b-start").value, len = Number($("#b-len").value);
+    const count = Math.min(60, Math.max(0, Math.round(Number($("#b-count").value) || 0)));
+    if (!first || !count) return [];
+    let num = Math.max(1, Math.round(Number($("#b-num").value) || 1));
+    return Array.from({ length: count }, (_, i) => {
+      const start = addDays(first, i * (len === 5 ? 7 : len)); // 5-day weeks still start a week apart
+      const no_class = breaks.has(i);
+      return { start, end: addDays(start, len - 1), no_class, label: no_class ? "Break" : `Week ${num++}` };
+    });
+  }
+
+  function preview() {
+    const list = planned();
+    $("#bulk-preview").innerHTML = list.length ? `
+      <thead><tr><th>No class</th><th>Week</th><th>Dates</th></tr></thead>
+      <tbody>${list.map((w, i) => {
+        const clash = weeks.find(o => o.start <= w.end && o.end >= w.start);
+        return `<tr>
+          <td><input type="checkbox" data-break="${i}" ${w.no_class ? "checked" : ""} aria-label="No class in week starting ${esc(w.start)}"></td>
+          <td>${esc(w.label)}${clash ? `<span class="badge warn">overlaps ${esc(weekName(clash))}</span>` : ""}</td>
+          <td>${fmt(w.start, { weekday: "short", month: "short", day: "numeric" })} – ${fmt(w.end, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
+        </tr>`;
+      }).join("")}</tbody>` : "";
+    $("#b-create").textContent = list.length ? `Create ${list.length} week${list.length === 1 ? "" : "s"}` : "Create weeks";
+    $("#b-create").disabled = !list.length;
+  }
+
+  ["#b-start", "#b-count", "#b-len", "#b-num"].forEach(sel => { $(sel).oninput = () => { msg.textContent = ""; preview(); }; });
+  $("#bulk-preview").onchange = e => {
+    const i = Number(e.target.dataset.break);
+    if (e.target.checked) breaks.add(i); else breaks.delete(i);
+    preview();
+  };
+  $("#b-create").onclick = async () => {
+    msg.textContent = "";
+    try {
+      const r = await busy($("#b-create"), "Creating…", () => api("addWeeks", { weeks: planned() }));
+      await renderAdmin(r.overview);
+    } catch (ex) { msg.textContent = ex.message; }
+  };
+  preview();
 }
 
 async function showStudent(email) {
@@ -822,19 +915,36 @@ async function showStudent(email) {
       <div class="week" data-week="${w.id}">
         <div class="week-head">
           <strong>${esc(weekName(w))} <span class="muted" style="font-weight:400;font-size:13px">${range(w)}</span></strong>
-          <span><span class="total">${e ? `${hrs(e.hours)} h` : '<span class="muted">not logged</span>'}</span>
-            <button class="ghost small" data-edit-entry="${w.id}">${e ? "Edit" : "Add"}</button></span>
+          <span><span class="total">${e?.excused ? '<span class="excused">excused</span>' : e ? `${hrs(e.hours)} h` : `<span class="muted">${w.no_class ? "no class" : "not logged"}</span>`}</span>
+            <button class="ghost small" data-edit-entry="${w.id}">${e && !e.excused ? "Edit" : "Add"}</button>
+            ${e?.excused ? `<button class="ghost small" data-unexcuse="${w.id}">Remove excuse</button>`
+              : !e && !w.no_class ? `<button class="ghost small" data-excuse="${w.id}">Excuse</button>` : ""}</span>
         </div>
-        ${e ? `<div class="desc">${esc(e.description)}</div>${updatedText(e)}` : ""}
+        ${e?.excused ? `<div class="desc excused">${e.description ? esc(e.description) : "No reason given"}</div>${updatedText(e)}`
+          : e ? `<div class="desc">${esc(e.description)}</div>${updatedText(e)}` : ""}
         <div class="edit-slot"></div>
       </div>`;
   }).join("") || `<p class="muted">No weeks have started yet.</p>`;
 
   // Admin corrections: edit or clear any week for this student, even after it closes.
   $("#detail-weeks").onclick = async ev => {
+    const excuseId = Number(ev.target.dataset.excuse), unexcuseId = Number(ev.target.dataset.unexcuse);
+    const refresh = async r => { await renderAdmin(r.overview); await showStudent(email); };
+    if (excuseId) {
+      const reason = prompt(`Excuse ${user.name} from ${weekName(weeks.find(w => w.id === excuseId))}? Reason (optional):`, "");
+      if (reason === null) return;
+      try { await refresh(await busy(ev.target, "Saving…", () => api("excuseEntry", { email, week_id: excuseId, reason }))); }
+      catch (ex) { alert(ex.message); }
+      return;
+    }
+    if (unexcuseId) {
+      try { await refresh(await busy(ev.target, "Removing…", () => api("deleteEntry", { email, week_id: unexcuseId }))); }
+      catch (ex) { alert(ex.message); }
+      return;
+    }
     const editId = Number(ev.target.dataset.editEntry);
     if (editId) {
-      const block = ev.target.closest(".week"), e = entries[editId], slot = $(".edit-slot", block);
+      const block = ev.target.closest(".week"), e0 = entries[editId], e = e0?.excused ? null : e0, slot = $(".edit-slot", block);
       slot.innerHTML = `
         <form class="detail-edit">
           <input name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" aria-label="Total hours" required>

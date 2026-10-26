@@ -28,19 +28,19 @@ const ADMINS_SHEET = 'Admins';
 const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
-const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by'];
+const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused'];
 const USERS_HEADERS = ['Email', 'Name', 'Joined', 'Last login'];
 // Tabs the app manages itself: a missing column header is added instead of reported.
 const OWN_TABS = [USERS_SHEET, 'Weeks', 'Settings'];
 // Columns added by newer versions of the app; they're added to any tab that lacks them.
-const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by'];
+const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class'];
 const SETTINGS_SHEET = 'Settings';
 const SETTINGS_HEADERS = ['Key', 'Value'];
 // Students can change a week until this many days after it ends, unless the admin changes it.
 const DEFAULT_GRACE_DAYS = 2;
 // Opening the site again within this long doesn't rewrite the last-login time.
 const LOGIN_EVERY_MS = 5 * 60 * 1000;
-const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto'];
+const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto', 'No class'];
 
 function doGet() {
   return json_({ ok: true, app: 'APW Hours Log' });
@@ -56,7 +56,7 @@ function authorize() {
 
 // Actions that change the sheet. They take the script lock up front; everything else
 // only reads, so many students can load the page at once without queueing.
-const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'saveWeek', 'deleteWeek', 'addUsers', 'removeUser', 'saveSettings'];
+const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'excuseEntry', 'saveWeek', 'addWeeks', 'deleteWeek', 'addUsers', 'removeUser', 'saveSettings'];
 
 // Per-request state: tab reads are remembered until something is written (each Sheets
 // call is slow), and the lock is only held when this request needs to write.
@@ -122,6 +122,16 @@ function route_(body, auth) {
       if (target.email !== me.email) result.overview = overview_();
       return result;
     }
+    case 'excuseEntry': {
+      requireAdmin();
+      const target = entryTarget_(me, body);
+      excuseEntry_(me, target, body);
+      return { entries: entriesFor_(target.email, listWeeks_()), overview: overview_() };
+    }
+    case 'addWeeks':
+      requireAdmin();
+      addWeeks_(body);
+      return { weeks: listWeeks_(), overview: overview_() };
     case 'saveSettings':
       requireAdmin();
       saveSettings_(body);
@@ -324,7 +334,15 @@ function removeUser_(me, body) {
 // ---------- weeks ----------
 
 function toWeek_(r) {
-  return { id: Number(r.id), label: String(r.label || ''), start: toIso_(r.start), end: toIso_(r.end), auto: String(r.auto) === '1' || r.auto === true, _row: r._row };
+  return {
+    id: Number(r.id), label: String(r.label || ''), start: toIso_(r.start), end: toIso_(r.end),
+    auto: String(r.auto) === '1' || r.auto === true, no_class: truthy_(r['no class']), _row: r._row,
+  };
+}
+
+// "yes", "true", "1", "x" or a checked checkbox.
+function truthy_(v) {
+  return v === true || /^(yes|true|1|x)$/i.test(String(v == null ? '' : v).trim());
 }
 
 // The week an hours row belongs to: the week starting on its date, or else the week that
@@ -344,7 +362,7 @@ function listWeeks_() {
     ensureCurrentWeek_();
     return weekRows_(table_(WEEKS_SHEET, WEEKS_HEADERS))
       .sort((a, b) => (a.start < b.start ? -1 : 1))
-      .map(w => ({ id: w.id, label: w.label, start: w.start, end: w.end, due: dueDate_(w) }));
+      .map(w => ({ id: w.id, label: w.label, start: w.start, end: w.end, due: dueDate_(w), no_class: w.no_class }));
   });
 }
 
@@ -421,27 +439,63 @@ function findWeek_(id) {
   return week;
 }
 
-function saveWeek_(body) {
-  const label = String(body.label || '').trim();
-  const start = String(body.start || '');
-  const end = String(body.end || '');
+function cleanWeek_(w) {
+  const label = String(w.label || '').trim();
+  const start = String(w.start || '');
+  const end = String(w.end || '');
   if (!isIsoDate_(start) || !isIsoDate_(end)) fail_('Pick a start and end date');
   if (end < start) fail_('End date must be on or after the start date');
   if (label.length > 60) fail_('Label is too long (60 characters max)');
+  return { label, start, end, no_class: !!w.no_class };
+}
+
+// Existing weeks overlapping [start, end]. Admin-defined weeks may replace auto-created ones
+// that nobody has logged hours in yet ("replaceable"); any other overlap is a "clash".
+function overlaps_(weeks, start, end, exceptId) {
+  const hourRows = table_(HOURS_SHEET, HOURS_HEADERS).rows;
+  const overlapping = weeks.filter(w => w.id !== exceptId && w.start <= end && w.end >= start);
+  const replaceable = overlapping.filter(w => w.auto && !hourRows.some(r => toIso_(r.week) >= w.start && toIso_(r.week) <= w.end));
+  return { clash: overlapping.find(w => replaceable.indexOf(w) === -1), replaceable };
+}
+
+function clashMessage_(w, clash) {
+  return `${w.label || w.start} overlaps ${clash.label || 'the week'} (${clash.start} to ${clash.end})`;
+}
+
+function saveWeek_(body) {
+  const w = cleanWeek_(body);
   const id = body.id ? Number(body.id) : null;
   const t = table_(WEEKS_SHEET, WEEKS_HEADERS);
   const weeks = weekRows_(t);
-  const editing = id ? weeks.find(w => w.id === id) : null;
+  const editing = id ? weeks.find(x => x.id === id) : null;
   if (id && !editing) fail_('Week not found');
-  const overlapping = weeks.filter(w => w.id !== id && w.start <= end && w.end >= start);
-  // Admin-defined weeks replace auto-created ones that nobody has logged hours in yet.
-  const hourRows = table_(HOURS_SHEET, HOURS_HEADERS).rows;
-  const replaceable = overlapping.filter(w => w.auto && !hourRows.some(r => toIso_(r.week) >= w.start && toIso_(r.week) <= w.end));
-  const clash = overlapping.find(w => replaceable.indexOf(w) === -1);
+  const { clash, replaceable } = overlaps_(weeks, w.start, w.end, id);
   if (clash) fail_(`Overlaps ${clash.label || 'the week'} (${clash.start} to ${clash.end})`);
-  if (editing) writeRow_(t, editing._row, { label, start, end, auto: 0 });
-  else writeRow_(t, null, { id: nextId_(weeks), label, start, end, auto: 0 });
-  deleteRows_(t, replaceable.map(w => w._row));
+  const fields = { label: w.label, start: w.start, end: w.end, auto: 0, 'no class': w.no_class ? 'yes' : '' };
+  if (editing) writeRow_(t, editing._row, fields);
+  else writeRow_(t, null, Object.assign({ id: nextId_(weeks) }, fields));
+  deleteRows_(t, replaceable.map(x => x._row));
+}
+
+// Adds many weeks at once (all or nothing): none may overlap each other or an existing week.
+function addWeeks_(body) {
+  const list = (Array.isArray(body.weeks) ? body.weeks : []).map(cleanWeek_).sort((a, b) => (a.start < b.start ? -1 : 1));
+  if (!list.length) fail_('Add at least one week');
+  if (list.length > 60) fail_('Add at most 60 weeks at a time');
+  for (let i = 1; i < list.length; i++) {
+    if (list[i].start <= list[i - 1].end) fail_(clashMessage_(list[i], list[i - 1]));
+  }
+  const t = table_(WEEKS_SHEET, WEEKS_HEADERS);
+  const weeks = weekRows_(t);
+  const replace = {};
+  list.forEach(w => {
+    const { clash, replaceable } = overlaps_(weeks, w.start, w.end, null);
+    if (clash) fail_(clashMessage_(w, clash));
+    replaceable.forEach(x => { replace[x._row] = true; });
+  });
+  let id = nextId_(weeks);
+  appendRows_(t, list.map(w => ({ id: id++, label: w.label, start: w.start, end: w.end, auto: 0, 'no class': w.no_class ? 'yes' : '' })));
+  deleteRows_(t, Object.keys(replace).map(Number));
 }
 
 function deleteWeek_(id) {
@@ -461,15 +515,17 @@ function hoursByUser_(weeks) {
     const email = String(r.username).toLowerCase();
     const week = weekFor_(weeks, toIso_(r.week));
     const hours = Number(r.hours);
-    if (!email || !week || r.hours === '' || !isFinite(hours)) return;
+    const excused = truthy_(r.excused);
+    if (!email || !week) return;
+    if (!excused && (r.hours === '' || !isFinite(hours))) return;
     const updated = loginMs_(r.updated);
     const updatedBy = String(r['updated by'] || '').trim().toLowerCase();
     const updatedDay = typeof r.updated === 'string' ? toIso_(r.updated.slice(0, 10)) : toIso_(r.updated);
     (out[email] = out[email] || {})[week.id] = {
-      week_id: week.id, hours, description: String(r.notes),
+      week_id: week.id, hours: excused ? 0 : hours, description: String(r.notes), excused,
       updated, updated_by: updatedBy || null,
       // Logged by the student after the week was over (during the grace period).
-      late: !!updated && (!updatedBy || updatedBy === email) && updatedDay > week.end,
+      late: !excused && !!updated && (!updatedBy || updatedBy === email) && updatedDay > week.end,
     };
   });
   return out;
@@ -509,6 +565,7 @@ function saveEntry_(me, target, body) {
   const week = findWeek_(body.week_id);
   if (week.start > today_()) fail_("That week hasn't started yet");
   if (!me.is_admin && isClosed_(week)) fail_(closedMessage_(week));
+  if (!me.is_admin && week.no_class) fail_(`There was no class ${week.label ? 'in ' + week.label : 'that week'}, so there's nothing to log.`);
   const hours = Math.round(Number(body.hours) * 100) / 100;
   if (!isFinite(hours) || hours <= 0 || hours > 100) fail_('Weekly hours must be between 0 and 100');
   const notes = String(body.description || '').trim();
@@ -518,9 +575,22 @@ function saveEntry_(me, target, body) {
   const rows = userWeekRows_(t, target.email, week);
   writeRow_(t, rows[0] || null, {
     username: target.email, name: target.name, week: week.start, hours, notes,
-    updated: stamp_(), 'updated by': me.email,
+    updated: stamp_(), 'updated by': me.email, excused: '', // logging hours replaces an excuse
   });
   deleteRows_(t, rows.slice(1)); // drop duplicates for the same week
+}
+
+// Admins: mark a student as excused from a week (no hours expected), with an optional reason.
+function excuseEntry_(me, target, body) {
+  const week = findWeek_(body.week_id);
+  const reason = String(body.reason || '').trim().slice(0, 200);
+  const t = table_(HOURS_SHEET, HOURS_HEADERS);
+  const rows = userWeekRows_(t, target.email, week);
+  writeRow_(t, rows[0] || null, {
+    username: target.email, name: target.name, week: week.start, hours: '', notes: reason,
+    updated: stamp_(), 'updated by': me.email, excused: 'yes',
+  });
+  deleteRows_(t, rows.slice(1));
 }
 
 function deleteEntry_(me, target, body) {
@@ -642,6 +712,18 @@ function cell_(v) {
 }
 
 // Writes fields into sheet row `row`, or appends a new row when `row` is null.
+// Appends several rows in one write.
+function appendRows_(t, list) {
+  if (!list.length) return;
+  const lines = list.map(fields => {
+    const line = new Array(t.width).fill('');
+    Object.keys(fields).forEach(k => { line[t.cols[k]] = safe_(fields[k]); });
+    return line;
+  });
+  t.sh.getRange(t.sh.getLastRow() + 1, 1, lines.length, t.width).setValues(lines);
+  changed_();
+}
+
 function writeRow_(t, row, fields) {
   const existing = row ? t.rows.find(r => r._row === row) : null;
   const line = existing ? existing._raw.slice() : new Array(t.width).fill('');

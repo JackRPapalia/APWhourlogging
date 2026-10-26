@@ -33,12 +33,15 @@
   button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   button.small { padding: 4px 10px; font-size: 13px; }
   button.danger { background: transparent; color: var(--danger); border-color: transparent; }
+  button.link { background: none; border: 0; padding: 0; color: var(--accent); font-size: 13px; }
   button:disabled { opacity: .5; cursor: default; }
   .error { color: var(--danger); font-size: 14px; min-height: 20px; margin-top: 8px; }
   .ok { color: var(--ok); }
   .muted { color: var(--muted); }
   .auth { max-width: 380px; margin: 60px auto; }
   .auth .field { margin-bottom: 12px; }
+  .auth .divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; margin: 16px 0; }
+  .auth .divider::before, .auth .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
   .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
   .week { border-top: 1px solid var(--border); padding: 16px 0; }
   .week:first-child { border-top: 0; padding-top: 0; }
@@ -69,6 +72,7 @@
   .stat .l { font-size: 12px; color: var(--muted); }
   .week-editor { display: grid; grid-template-columns: 1fr 160px 160px auto; gap: 12px; align-items: end; margin-top: 16px; }
   .week-editor .btns { display: flex; gap: 6px; }
+  .loading { text-align: center; color: var(--muted); padding: 60px 0; }
   .hidden { display: none !important; }
   @media (max-width: 640px) {
     .week-form { grid-template-columns: 1fr; }
@@ -88,7 +92,7 @@
   <button class="ghost small" id="logout">Log out</button>
 </header>
 
-<main id="app"></main>
+<main id="app"><p class="loading">Loading…</p></main>
 
 <template id="tpl-auth">
   <div class="card auth">
@@ -99,11 +103,14 @@
     </div>
     <form id="auth-form">
       <div class="field signup-only hidden"><label for="a-name">Full name</label><input id="a-name" autocomplete="name"></div>
-      <div class="field"><label for="a-user">Username</label><input id="a-user" autocomplete="username" required></div>
+      <div class="field"><label for="a-email">Email</label><input id="a-email" type="email" autocomplete="email" required></div>
       <div class="field"><label for="a-pass">Password</label><input id="a-pass" type="password" autocomplete="current-password" required></div>
       <button type="submit" style="width:100%">Log in</button>
+      <div class="login-only" style="margin-top:10px"><button type="button" class="link" id="forgot">Forgot password?</button></div>
       <div class="error" id="auth-error"></div>
     </form>
+    <div class="divider">or</div>
+    <button type="button" class="ghost" id="google" style="width:100%">Continue with Google</button>
   </div>
 </template>
 
@@ -159,24 +166,42 @@
   </div>
 </template>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
+  updateProfile, signInWithPopup, GoogleAuthProvider, sendPasswordResetEmail, signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { firebaseConfig, SCRIPT_URL } from "./config.js";
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const app = $("#app");
 let me = null;
 let view = "student";
+let pendingName = ""; // full name typed at sign-up, sent with the first request
+
+if (firebaseConfig.apiKey.startsWith("PASTE")) {
+  app.innerHTML = `<div class="card auth"><h2>Almost there</h2><p class="muted">Paste your Firebase web config into <code>config.js</code> to turn on login. See the README for the steps.</p></div>`;
+  throw new Error("Firebase config missing");
+}
+const auth = getAuth(initializeApp(firebaseConfig));
 
 // ---------- helpers ----------
-async function api(path, opts = {}) {
-  const res = await fetch("/api/" + path, {
-    method: opts.method || "GET",
-    headers: opts.body ? { "Content-Type": "application/json" } : {},
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-    credentials: "same-origin",
-  });
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401 && path !== "login") { me = null; render(); }
-  if (!res.ok) throw new Error(data.error || "Something went wrong");
-  return data;
+// Calls the Apps Script backend with the signed-in user's Firebase ID token.
+// The body is sent as text/plain so the browser doesn't need a CORS preflight.
+async function api(action, data = {}) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Please log in");
+  const idToken = await user.getIdToken();
+  let out;
+  try {
+    const res = await fetch(SCRIPT_URL, { method: "POST", body: JSON.stringify({ ...data, action, idToken }) });
+    out = await res.json();
+  } catch {
+    throw new Error("Couldn't reach the server. Check your connection and try again.");
+  }
+  if (out.error) throw new Error(out.error);
+  return out;
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const parseDay = s => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
@@ -193,105 +218,171 @@ const started = w => w.start <= today();
 const isCurrent = w => w.start <= today() && today() <= w.end;
 // The week happening now, or else the most recent one that has started, or else the first.
 const defaultWeek = weeks => (weeks.find(isCurrent) || weeks.filter(started).at(-1) || weeks[0])?.id;
+const loading = () => { app.innerHTML = `<p class="loading">Loading…</p>`; };
+const fatal = msg => { app.innerHTML = `<div class="card"><p class="error" style="margin:0">${esc(msg)}</p></div>`; };
+
+// Runs fn while a button shows a busy label, so slow sheet calls don't look frozen.
+async function busy(button, label, fn) {
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = label;
+  try { return await fn(); } finally { button.disabled = false; button.textContent = old; }
+}
+
+function authMessage(ex) {
+  const messages = {
+    "auth/invalid-credential": "Wrong email or password",
+    "auth/wrong-password": "Wrong email or password",
+    "auth/user-not-found": "Wrong email or password",
+    "auth/invalid-email": "Enter a valid email address",
+    "auth/missing-password": "Enter your password",
+    "auth/email-already-in-use": "An account with that email already exists. Try logging in.",
+    "auth/weak-password": "Password must be at least 6 characters",
+    "auth/too-many-requests": "Too many attempts. Wait a minute and try again.",
+    "auth/popup-closed-by-user": "",
+    "auth/cancelled-popup-request": "",
+    "auth/operation-not-allowed": "That sign-in method isn't turned on in Firebase yet.",
+    "auth/unauthorized-domain": "This website isn't on Firebase's list of authorized domains yet.",
+  };
+  return ex.code in messages ? messages[ex.code] : ex.message;
+}
 
 // ---------- top-level ----------
-function render() {
+function render(data) {
   $("#topbar").classList.toggle("hidden", !me);
   if (!me) return renderAuth();
-  $("#who").textContent = `${me.name} (${me.username})`;
+  $("#who").textContent = `${me.name} (${me.email})`;
   const nav = $("#nav");
   nav.innerHTML = me.is_admin
     ? `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
        <button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>`
     : "";
   nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
-  if (view === "admin" && me.is_admin) renderAdmin(); else renderStudent();
+  const page = view === "admin" && me.is_admin ? renderAdmin() : renderStudent(data);
+  page.catch(ex => fatal(ex.message));
 }
 
-$("#logout").onclick = async () => { await api("logout", { method: "POST" }); me = null; view = "student"; render(); };
+$("#logout").onclick = () => signOut(auth);
+
+onAuthStateChanged(auth, async user => {
+  if (!user) { me = null; view = "student"; return render(); }
+  loading();
+  try {
+    const data = await api("me", { name: pendingName || user.displayName || "" });
+    pendingName = "";
+    me = data.user;
+    view = me.is_admin ? "admin" : "student";
+    render(data);
+  } catch (ex) {
+    fatal(ex.message);
+  }
+});
 
 // ---------- auth ----------
 function renderAuth() {
   app.replaceChildren($("#tpl-auth").content.cloneNode(true));
   let mode = "login";
-  const form = $("#auth-form"), err = $("#auth-error");
+  const form = $("#auth-form"), err = $("#auth-error"), submit = form.querySelector("button[type=submit]");
   app.querySelectorAll("[data-mode]").forEach(btn => btn.onclick = () => {
     mode = btn.dataset.mode;
     app.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === btn));
     $(".signup-only").classList.toggle("hidden", mode !== "signup");
+    $(".login-only").classList.toggle("hidden", mode !== "login");
     $("#a-name").required = mode === "signup";
     $("#a-pass").autocomplete = mode === "signup" ? "new-password" : "current-password";
-    form.querySelector("button[type=submit]").textContent = mode === "signup" ? "Create account" : "Log in";
+    submit.textContent = mode === "signup" ? "Create account" : "Log in";
     err.textContent = "";
   });
   form.onsubmit = async e => {
     e.preventDefault();
     err.textContent = "";
+    const email = $("#a-email").value.trim(), password = $("#a-pass").value;
     try {
-      const body = { username: $("#a-user").value, password: $("#a-pass").value };
-      if (mode === "signup") body.name = $("#a-name").value;
-      me = (await api(mode, { method: "POST", body })).user;
-      view = me.is_admin ? "admin" : "student";
-      render();
-    } catch (ex) { err.textContent = ex.message; }
+      await busy(submit, mode === "signup" ? "Creating account…" : "Logging in…", async () => {
+        if (mode === "signup") {
+          pendingName = $("#a-name").value.trim();
+          const { user } = await createUserWithEmailAndPassword(auth, email, password);
+          await updateProfile(user, { displayName: pendingName });
+        } else {
+          await signInWithEmailAndPassword(auth, email, password);
+        }
+      });
+    } catch (ex) { err.textContent = authMessage(ex); }
+  };
+  $("#forgot").onclick = async () => {
+    const email = $("#a-email").value.trim();
+    err.className = "error";
+    if (!email) { err.textContent = "Enter your email above, then click Forgot password."; return; }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      err.className = "error ok";
+      err.textContent = `If there's an account for ${email}, a reset link is on its way.`;
+    } catch (ex) { err.textContent = authMessage(ex); }
+  };
+  $("#google").onclick = async () => {
+    err.textContent = "";
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+    catch (ex) { err.textContent = authMessage(ex); }
   };
 }
 
 // ---------- student ----------
-async function renderStudent() {
+async function renderStudent(data) {
+  if (!data) { loading(); data = await api("me"); }
   app.replaceChildren($("#tpl-student").content.cloneNode(true));
-  let { weeks, entries } = await api("entries");
+  const { weeks } = data;
+  let { entries } = data;
   const open = weeks.filter(started).reverse();
 
-  function drawStats() {
-    const cur = weeks.find(isCurrent);
-    const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
-    $("#my-stats").innerHTML =
-      stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${weekName(cur)})` : "No week in progress") +
-      stat(hrs(total), "Total hours") +
-      stat(`${Object.keys(entries).length}/${open.length}`, "Weeks logged");
-  }
+  const cur = weeks.find(isCurrent);
+  const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
+  $("#my-stats").innerHTML =
+    stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${esc(weekName(cur))})` : "No week in progress") +
+    stat(hrs(total), "Total hours") +
+    stat(`${Object.keys(entries).length}/${open.length}`, "Weeks logged");
 
   const list = $("#my-weeks");
   if (!open.length) {
     list.innerHTML = `<p class="muted">${weeks.length ? `The first week starts ${range(weeks[0])}.` : "Your teacher hasn't set up any weeks yet."}</p>`;
-  } else {
-    list.innerHTML = open.map(w => {
-      const e = entries[w.id];
-      return `
-      <form class="week" data-week="${w.id}">
-        <div class="week-head">
-          <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}</strong>
-          <span class="muted" style="font-size:13px">${range(w)}</span>
-        </div>
-        <div class="week-form">
-          <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" required></div>
-          <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${e ? esc(e.description) : ""}</textarea></div>
-          <div class="actions">
-            <button type="submit" class="small">${e ? "Update" : "Save"}</button>
-            ${e ? `<button type="button" class="danger small" data-clear>Clear</button>` : ""}
-            <span class="status ${e ? "ok" : "muted"}">${e ? "Saved" : "Not logged yet"}</span>
-          </div>
-        </div>
-      </form>`;
-    }).join("");
+    return;
   }
-  drawStats();
+  list.innerHTML = open.map(w => {
+    const e = entries[w.id];
+    return `
+    <form class="week" data-week="${w.id}">
+      <div class="week-head">
+        <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}</strong>
+        <span class="muted" style="font-size:13px">${range(w)}</span>
+      </div>
+      <div class="week-form">
+        <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" required></div>
+        <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${e ? esc(e.description) : ""}</textarea></div>
+        <div class="actions">
+          <button type="submit" class="small">${e ? "Update" : "Save"}</button>
+          ${e ? `<button type="button" class="danger small" data-clear>Clear</button>` : ""}
+          <span class="status ${e ? "ok" : "muted"}">${e ? "Saved" : "Not logged yet"}</span>
+        </div>
+      </div>
+    </form>`;
+  }).join("");
 
+  const reload = async result => { await renderStudent({ weeks, entries: result.entries }); };
   list.onsubmit = async ev => {
     ev.preventDefault();
     const form = ev.target, status = $(".status", form);
     try {
-      ({ entries } = await api("entries", { method: "POST", body: { week_id: Number(form.dataset.week), hours: form.hours.value, description: form.description.value } }));
-      renderStudent();
+      const result = await busy(form.querySelector("button[type=submit]"), "Saving…", () =>
+        api("saveEntry", { week_id: Number(form.dataset.week), hours: form.hours.value, description: form.description.value }));
+      await reload(result);
     } catch (ex) { status.className = "status error"; status.style.margin = 0; status.textContent = ex.message; }
   };
   list.onclick = async ev => {
     if (!ev.target.matches("[data-clear]")) return;
     const form = ev.target.closest("form");
     if (!confirm("Clear your hours for this week?")) return;
-    await api(`entries/${form.dataset.week}`, { method: "DELETE" });
-    renderStudent();
+    try {
+      await reload(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })));
+    } catch (ex) { $(".status", form).textContent = ex.message; }
   };
 }
 
@@ -300,8 +391,9 @@ let adminWeek = null;
 let adminSort = "name";
 
 async function renderAdmin() {
+  loading();
+  const { weeks, students } = await api("overview");
   app.replaceChildren($("#tpl-admin").content.cloneNode(true));
-  const { weeks, students } = await api("admin/overview");
   if (!weeks.some(w => w.id === adminWeek)) adminWeek = defaultWeek(weeks);
   $("#sort").value = adminSort;
 
@@ -331,8 +423,8 @@ async function renderAdmin() {
         ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
         <th class="num">Total</th></tr></thead>
       <tbody>${sorted.map(s => `
-        <tr class="clickable" data-user="${s.id}">
-          <td>${esc(s.name)} <span class="muted">${esc(s.username)}</span>${s.is_admin ? '<span class="badge">admin</span>' : ""}</td>
+        <tr class="clickable" data-user="${esc(s.email)}">
+          <td>${esc(s.name)} <span class="muted">${esc(s.email)}</span>${s.is_admin ? '<span class="badge">admin</span>' : ""}</td>
           ${weeks.map(w => { const v = s.hours[w.id] || 0; return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}</td>`; }).join("")}
           <td class="num"><strong>${hrs(s.total)}</strong></td>
         </tr>`).join("") || `<tr><td colspan="${weeks.length + 2}" class="muted">No accounts yet.</td></tr>`}
@@ -341,12 +433,12 @@ async function renderAdmin() {
 
   $("#wk-select").onchange = e => { adminWeek = Number(e.target.value); draw(); };
   $("#sort").onchange = e => { adminSort = e.target.value; draw(); };
-  $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(Number(tr.dataset.user)); };
+  $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(tr.dataset.user).catch(ex => alert(ex.message)); };
   $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
   $("#export").onclick = () => {
     const q = v => `"${String(v).replace(/"/g, '""')}"`;
-    const lines = [["Name", "Username", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
-    for (const s of students.filter(s => !s.is_admin)) lines.push([s.name, s.username, ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
+    const lines = [["Name", "Email", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
+    for (const s of students.filter(s => !s.is_admin)) lines.push([s.name, s.email, ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
     a.download = `apw-hours-${today()}.csv`;
@@ -400,43 +492,43 @@ function setupWeekEditor(weeks) {
     }
     if (delId) {
       const w = weeks.find(w => w.id === delId);
-      if (!confirm(`Delete ${weekName(w)}? Any hours students logged for it will be deleted too.`)) return;
-      await api(`admin/weeks/${delId}`, { method: "DELETE" });
-      renderAdmin();
+      if (!confirm(`Delete ${weekName(w)}? Hours students logged for it stay in the sheet but won't show here.`)) return;
+      try {
+        await busy(e.target, "Deleting…", () => api("deleteWeek", { id: delId }));
+        renderAdmin().catch(ex => fatal(ex.message));
+      } catch (ex) { err.textContent = ex.message; }
     }
   };
   form.onsubmit = async e => {
     e.preventDefault();
     err.textContent = "";
-    const body = { label: $("#w-label").value, start: $("#w-start").value, end: $("#w-end").value };
+    const body = { id: editing?.id, label: $("#w-label").value, start: $("#w-start").value, end: $("#w-end").value };
     try {
-      await api(editing ? `admin/weeks/${editing.id}` : "admin/weeks", { method: "POST", body });
-      renderAdmin();
+      await busy($("#w-submit"), "Saving…", () => api("saveWeek", body));
+      renderAdmin().catch(ex => fatal(ex.message));
     } catch (ex) { err.textContent = ex.message; }
   };
 }
 
-async function showStudent(id) {
-  const { user, weeks, entries } = await api(`admin/users/${id}/entries`);
+async function showStudent(email) {
   const panel = $("#detail");
   panel.classList.remove("hidden");
+  $("#detail-title").textContent = "Loading…";
+  $("#detail-actions").innerHTML = "";
+  $("#detail-weeks").innerHTML = "";
+  const { user, weeks, entries } = await api("userEntries", { email });
   $("#detail-title").textContent = `${user.name} — ${hrs(Object.values(entries).reduce((s, e) => s + e.hours, 0))} h total`;
-  const actions = $("#detail-actions");
-  actions.innerHTML = user.id === me.id ? "" : `
-    <button class="ghost small" id="toggle-admin">${user.is_admin ? "Remove admin" : "Make admin"}</button>
-    <button class="ghost small" id="reset-pw">Reset password</button>
-    <span class="muted" id="detail-msg" style="font-size:13px"></span>`;
-  if (user.id !== me.id) {
-    $("#toggle-admin").onclick = async () => {
+  if (user.email !== me.email) {
+    $("#detail-actions").innerHTML = `
+      <button class="ghost small" id="toggle-admin">${user.is_admin ? "Remove admin" : "Make admin"}</button>
+      <span class="muted" id="detail-msg" style="font-size:13px"></span>`;
+    $("#toggle-admin").onclick = async e => {
       if (!confirm(`${user.is_admin ? "Remove admin access from" : "Give admin access to"} ${user.name}?`)) return;
-      await api(`admin/users/${id}/role`, { method: "POST", body: { is_admin: !user.is_admin } });
-      await renderAdmin(); showStudent(id);
-    };
-    $("#reset-pw").onclick = async () => {
-      const pw = prompt(`New password for ${user.name} (min 8 characters):`);
-      if (!pw) return;
-      try { await api(`admin/users/${id}/password`, { method: "POST", body: { password: pw } }); $("#detail-msg").textContent = "Password updated."; }
-      catch (ex) { $("#detail-msg").textContent = ex.message; }
+      try {
+        await busy(e.target, "Saving…", () => api("setRole", { email: user.email, is_admin: !user.is_admin }));
+        await renderAdmin();
+        await showStudent(email);
+      } catch (ex) { $("#detail-msg").textContent = ex.message; }
     };
   }
   const shown = weeks.filter(started).reverse();
@@ -453,9 +545,6 @@ async function showStudent(id) {
   }).join("") || `<p class="muted">No weeks have started yet.</p>`;
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
-
-// ---------- boot ----------
-api("me").then(d => { me = d.user; if (me?.is_admin) view = "admin"; render(); }).catch(() => render());
 </script>
 </body>
 </html>

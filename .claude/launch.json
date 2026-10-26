@@ -1,6 +1,6 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "apwlog", "runtimeExecutable": "python3", "runtimeArgs": ["server.py"], "port": 8000 }
+    { "name": "apwlog", "runtimeExecutable": "python3", "runtimeArgs": ["-m", "http.server", "8000"], "port": 8000 }
   ]
 }

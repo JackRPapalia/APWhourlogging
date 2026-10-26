@@ -29,6 +29,14 @@ function doGet() {
   return json_({ ok: true, app: 'APW Hours Log' });
 }
 
+// Run this once from the Apps Script editor (select "authorize", click Run) to grant the
+// permissions the web app needs: editing this spreadsheet and contacting Firebase.
+function authorize() {
+  SpreadsheetApp.getActiveSpreadsheet().getName();
+  UrlFetchApp.fetch('https://identitytoolkit.googleapis.com/', { muteHttpExceptions: true });
+  Logger.log('Authorized. The web app can now check Firebase logins.');
+}
+
 function doPost(e) {
   let result;
   try {

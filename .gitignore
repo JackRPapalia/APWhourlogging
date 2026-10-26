@@ -1,0 +1,5 @@
+apwlog.db
+__pycache__/
+.DS_Store
+config.json
+apps_script.local.gs

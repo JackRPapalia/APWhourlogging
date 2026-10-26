@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APW Hours Log</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1c1f24; --muted: #646b75; --border: #dde1e6;
+    --accent: #2f5bd3; --accent-soft: #e8eefc; --danger: #c23a3a; --ok: #1d7a46;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --card: #1c1f25; --text: #e7e9ec; --muted: #9aa1ab; --border: #2e333b;
+      --accent: #7f9ef5; --accent-soft: #232c44; --danger: #ef7d7d; --ok: #6fcf97;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 17px; margin: 0; }
+  header nav { display: flex; gap: 4px; margin-left: 8px; }
+  header .spacer { flex: 1; }
+  header .who { color: var(--muted); font-size: 14px; }
+  main { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  h2 { font-size: 16px; margin: 0 0 14px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input, textarea, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
+  textarea { resize: vertical; min-height: 60px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  button.small { padding: 4px 10px; font-size: 13px; }
+  button.danger { background: transparent; color: var(--danger); border-color: transparent; }
+  button:disabled { opacity: .5; cursor: default; }
+  .error { color: var(--danger); font-size: 14px; min-height: 20px; margin-top: 8px; }
+  .ok { color: var(--ok); }
+  .muted { color: var(--muted); }
+  .auth { max-width: 380px; margin: 60px auto; }
+  .auth .field { margin-bottom: 12px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 16px; }
+  .week { border-top: 1px solid var(--border); padding: 16px 0; }
+  .week:first-child { border-top: 0; padding-top: 0; }
+  .week-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+  .week-head strong { font-size: 15px; }
+  .week-form { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: start; }
+  .week-form .actions { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
+  .week-form .status { font-size: 13px; }
+  .total { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .desc { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+  .toolbar select { width: auto; max-width: 100%; }
+  .toolbar label { margin: 0; }
+  .grow { flex: 1; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; vertical-align: bottom; }
+  th .sub { display: block; font-weight: 400; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.current, td.current { background: var(--accent-soft); }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td { background: var(--accent-soft); }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); margin-left: 6px; font-weight: 500; }
+  .zero { color: var(--muted); }
+  .stat-row { display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 12px; color: var(--muted); }
+  .week-editor { display: grid; grid-template-columns: 1fr 160px 160px auto; gap: 12px; align-items: end; margin-top: 16px; }
+  .week-editor .btns { display: flex; gap: 6px; }
+  .hidden { display: none !important; }
+  @media (max-width: 640px) {
+    .week-form { grid-template-columns: 1fr; }
+    .week-editor { grid-template-columns: 1fr 1fr; }
+    .week-editor .label-field, .week-editor .btns { grid-column: 1 / -1; }
+    header { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+
+<header id="topbar" class="hidden">
+  <h1>APW Hours Log</h1>
+  <nav id="nav"></nav>
+  <span class="spacer"></span>
+  <span class="who" id="who"></span>
+  <button class="ghost small" id="logout">Log out</button>
+</header>
+
+<main id="app"></main>
+
+<template id="tpl-auth">
+  <div class="card auth">
+    <h2>APW Hours Log</h2>
+    <div class="tabs">
+      <button class="ghost small active" data-mode="login">Log in</button>
+      <button class="ghost small" data-mode="signup">Create account</button>
+    </div>
+    <form id="auth-form">
+      <div class="field signup-only hidden"><label for="a-name">Full name</label><input id="a-name" autocomplete="name"></div>
+      <div class="field"><label for="a-user">Username</label><input id="a-user" autocomplete="username" required></div>
+      <div class="field"><label for="a-pass">Password</label><input id="a-pass" type="password" autocomplete="current-password" required></div>
+      <button type="submit" style="width:100%">Log in</button>
+      <div class="error" id="auth-error"></div>
+    </form>
+  </div>
+</template>
+
+<template id="tpl-student">
+  <div class="card">
+    <div class="stat-row" id="my-stats" style="margin:0"></div>
+  </div>
+  <div class="card">
+    <h2>My weekly hours</h2>
+    <p class="muted" style="font-size:13px;margin:-6px 0 14px">Enter your total hours for each week and what you worked on. You can update a week any time.</p>
+    <div id="my-weeks"></div>
+  </div>
+</template>
+
+<template id="tpl-admin">
+  <div class="card">
+    <h2>Class overview</h2>
+    <div class="toolbar">
+      <label for="wk-select">Week</label>
+      <select id="wk-select"></select>
+      <span class="grow"></span>
+      <label for="sort">Sort</label>
+      <select id="sort">
+        <option value="name">Name</option>
+        <option value="week">Hours in selected week</option>
+        <option value="total">Total hours</option>
+      </select>
+      <button class="ghost small" id="export">Export CSV</button>
+    </div>
+    <div class="stat-row" id="class-stats"></div>
+    <div class="table-wrap"><table id="overview"></table></div>
+    <p class="muted" style="font-size:13px;margin:10px 0 0">Click a student to see what they wrote for each week.</p>
+  </div>
+  <div class="card hidden" id="detail">
+    <div class="week-head">
+      <h2 id="detail-title" style="margin:0"></h2>
+      <button class="ghost small" id="detail-close">Close</button>
+    </div>
+    <div class="toolbar" id="detail-actions"></div>
+    <div id="detail-weeks"></div>
+  </div>
+  <div class="card">
+    <h2>Weeks</h2>
+    <p class="muted" style="font-size:13px;margin:-6px 0 14px">Set the date range for each week. Students can log hours for a week once its start date arrives.</p>
+    <div class="table-wrap"><table id="weeks-table"></table></div>
+    <form id="week-editor" class="week-editor">
+      <div class="label-field"><label for="w-label">Label (optional)</label><input id="w-label" maxlength="60" placeholder="e.g. Week 5 or Project sprint"></div>
+      <div><label for="w-start">Start date</label><input id="w-start" type="date" required></div>
+      <div><label for="w-end">End date</label><input id="w-end" type="date" required></div>
+      <div class="btns"><button type="submit" id="w-submit">Add week</button><button type="button" class="ghost hidden" id="w-cancel">Cancel</button></div>
+    </form>
+    <div class="error" id="week-error"></div>
+  </div>
+</template>
+
+<script>
+const $ = (sel, root = document) => root.querySelector(sel);
+const app = $("#app");
+let me = null;
+let view = "student";
+
+// ---------- helpers ----------
+async function api(path, opts = {}) {
+  const res = await fetch("/api/" + path, {
+    method: opts.method || "GET",
+    headers: opts.body ? { "Content-Type": "application/json" } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    credentials: "same-origin",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== "login") { me = null; render(); }
+  if (!res.ok) throw new Error(data.error || "Something went wrong");
+  return data;
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const parseDay = s => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
+const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const addDays = (s, n) => { const d = parseDay(s); d.setDate(d.getDate() + n); return isoDay(d); };
+const today = () => isoDay(new Date());
+const fmt = (s, opts) => parseDay(s).toLocaleDateString(undefined, opts);
+const short = s => fmt(s, { month: "short", day: "numeric" });
+const range = w => `${short(w.start)} – ${fmt(w.end, { month: "short", day: "numeric", year: "numeric" })}`;
+const weekName = w => w.label || `Week of ${short(w.start)}`;
+const hrs = n => (Math.round(n * 100) / 100).toString();
+const stat = (v, l) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+const started = w => w.start <= today();
+const isCurrent = w => w.start <= today() && today() <= w.end;
+// The week happening now, or else the most recent one that has started, or else the first.
+const defaultWeek = weeks => (weeks.find(isCurrent) || weeks.filter(started).at(-1) || weeks[0])?.id;
+
+// ---------- top-level ----------
+function render() {
+  $("#topbar").classList.toggle("hidden", !me);
+  if (!me) return renderAuth();
+  $("#who").textContent = `${me.name} (${me.username})`;
+  const nav = $("#nav");
+  nav.innerHTML = me.is_admin
+    ? `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
+       <button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>`
+    : "";
+  nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
+  if (view === "admin" && me.is_admin) renderAdmin(); else renderStudent();
+}
+
+$("#logout").onclick = async () => { await api("logout", { method: "POST" }); me = null; view = "student"; render(); };
+
+// ---------- auth ----------
+function renderAuth() {
+  app.replaceChildren($("#tpl-auth").content.cloneNode(true));
+  let mode = "login";
+  const form = $("#auth-form"), err = $("#auth-error");
+  app.querySelectorAll("[data-mode]").forEach(btn => btn.onclick = () => {
+    mode = btn.dataset.mode;
+    app.querySelectorAll("[data-mode]").forEach(b => b.classList.toggle("active", b === btn));
+    $(".signup-only").classList.toggle("hidden", mode !== "signup");
+    $("#a-name").required = mode === "signup";
+    $("#a-pass").autocomplete = mode === "signup" ? "new-password" : "current-password";
+    form.querySelector("button[type=submit]").textContent = mode === "signup" ? "Create account" : "Log in";
+    err.textContent = "";
+  });
+  form.onsubmit = async e => {
+    e.preventDefault();
+    err.textContent = "";
+    try {
+      const body = { username: $("#a-user").value, password: $("#a-pass").value };
+      if (mode === "signup") body.name = $("#a-name").value;
+      me = (await api(mode, { method: "POST", body })).user;
+      view = me.is_admin ? "admin" : "student";
+      render();
+    } catch (ex) { err.textContent = ex.message; }
+  };
+}
+
+// ---------- student ----------
+async function renderStudent() {
+  app.replaceChildren($("#tpl-student").content.cloneNode(true));
+  let { weeks, entries } = await api("entries");
+  const open = weeks.filter(started).reverse();
+
+  function drawStats() {
+    const cur = weeks.find(isCurrent);
+    const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
+    $("#my-stats").innerHTML =
+      stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${weekName(cur)})` : "No week in progress") +
+      stat(hrs(total), "Total hours") +
+      stat(`${Object.keys(entries).length}/${open.length}`, "Weeks logged");
+  }
+
+  const list = $("#my-weeks");
+  if (!open.length) {
+    list.innerHTML = `<p class="muted">${weeks.length ? `The first week starts ${range(weeks[0])}.` : "Your teacher hasn't set up any weeks yet."}</p>`;
+  } else {
+    list.innerHTML = open.map(w => {
+      const e = entries[w.id];
+      return `
+      <form class="week" data-week="${w.id}">
+        <div class="week-head">
+          <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}</strong>
+          <span class="muted" style="font-size:13px">${range(w)}</span>
+        </div>
+        <div class="week-form">
+          <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" required></div>
+          <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${e ? esc(e.description) : ""}</textarea></div>
+          <div class="actions">
+            <button type="submit" class="small">${e ? "Update" : "Save"}</button>
+            ${e ? `<button type="button" class="danger small" data-clear>Clear</button>` : ""}
+            <span class="status ${e ? "ok" : "muted"}">${e ? "Saved" : "Not logged yet"}</span>
+          </div>
+        </div>
+      </form>`;
+    }).join("");
+  }
+  drawStats();
+
+  list.onsubmit = async ev => {
+    ev.preventDefault();
+    const form = ev.target, status = $(".status", form);
+    try {
+      ({ entries } = await api("entries", { method: "POST", body: { week_id: Number(form.dataset.week), hours: form.hours.value, description: form.description.value } }));
+      renderStudent();
+    } catch (ex) { status.className = "status error"; status.style.margin = 0; status.textContent = ex.message; }
+  };
+  list.onclick = async ev => {
+    if (!ev.target.matches("[data-clear]")) return;
+    const form = ev.target.closest("form");
+    if (!confirm("Clear your hours for this week?")) return;
+    await api(`entries/${form.dataset.week}`, { method: "DELETE" });
+    renderStudent();
+  };
+}
+
+// ---------- admin ----------
+let adminWeek = null;
+let adminSort = "name";
+
+async function renderAdmin() {
+  app.replaceChildren($("#tpl-admin").content.cloneNode(true));
+  const { weeks, students } = await api("admin/overview");
+  if (!weeks.some(w => w.id === adminWeek)) adminWeek = defaultWeek(weeks);
+  $("#sort").value = adminSort;
+
+  function draw() {
+    const sel = $("#wk-select");
+    sel.innerHTML = weeks.length
+      ? weeks.map(w => `<option value="${w.id}" ${w.id === adminWeek ? "selected" : ""}>${esc(weekName(w))} (${range(w)})</option>`).join("")
+      : `<option>No weeks set up yet</option>`;
+    sel.disabled = !weeks.length;
+
+    const wkHours = s => s.hours[adminWeek] || 0;
+    const sorted = [...students].sort((a, b) =>
+      adminSort === "week" ? wkHours(b) - wkHours(a) :
+      adminSort === "total" ? b.total - a.total :
+      a.name.localeCompare(b.name));
+    const learners = students.filter(s => !s.is_admin);
+    const logged = learners.filter(s => wkHours(s) > 0).length;
+    const weekTotal = learners.reduce((t, s) => t + wkHours(s), 0);
+    $("#class-stats").innerHTML =
+      stat(learners.length, "Students") +
+      stat(`${logged}/${learners.length}`, "Logged this week") +
+      stat(hrs(weekTotal), "Class hours this week") +
+      stat(logged ? hrs(weekTotal / logged) : "0", "Average per student who logged");
+
+    $("#overview").innerHTML = `
+      <thead><tr><th>Student</th>
+        ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
+        <th class="num">Total</th></tr></thead>
+      <tbody>${sorted.map(s => `
+        <tr class="clickable" data-user="${s.id}">
+          <td>${esc(s.name)} <span class="muted">${esc(s.username)}</span>${s.is_admin ? '<span class="badge">admin</span>' : ""}</td>
+          ${weeks.map(w => { const v = s.hours[w.id] || 0; return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}</td>`; }).join("")}
+          <td class="num"><strong>${hrs(s.total)}</strong></td>
+        </tr>`).join("") || `<tr><td colspan="${weeks.length + 2}" class="muted">No accounts yet.</td></tr>`}
+      </tbody>`;
+  }
+
+  $("#wk-select").onchange = e => { adminWeek = Number(e.target.value); draw(); };
+  $("#sort").onchange = e => { adminSort = e.target.value; draw(); };
+  $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(Number(tr.dataset.user)); };
+  $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
+  $("#export").onclick = () => {
+    const q = v => `"${String(v).replace(/"/g, '""')}"`;
+    const lines = [["Name", "Username", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
+    for (const s of students.filter(s => !s.is_admin)) lines.push([s.name, s.username, ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
+    a.download = `apw-hours-${today()}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  draw();
+  setupWeekEditor(weeks);
+}
+
+function setupWeekEditor(weeks) {
+  const form = $("#week-editor"), err = $("#week-error");
+  let editing = null;
+
+  $("#weeks-table").innerHTML = weeks.length ? `
+    <thead><tr><th>Week</th><th>Start</th><th>End</th><th></th></tr></thead>
+    <tbody>${[...weeks].reverse().map(w => `
+      <tr>
+        <td>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">current</span>' : ""}</td>
+        <td>${fmt(w.start, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
+        <td>${fmt(w.end, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
+        <td class="num"><button class="ghost small" data-edit="${w.id}">Edit</button> <button class="danger small" data-delete="${w.id}">Delete</button></td>
+      </tr>`).join("")}
+    </tbody>` : `<tbody><tr><td class="muted">No weeks yet. Add the first one below.</td></tr></tbody>`;
+
+  function reset() {
+    editing = null;
+    const last = weeks.at(-1);
+    const start = last ? addDays(last.end, 1) : today();
+    $("#w-label").value = "";
+    $("#w-start").value = start;
+    $("#w-end").value = addDays(start, 6);
+    $("#w-submit").textContent = "Add week";
+    $("#w-cancel").classList.add("hidden");
+    err.textContent = "";
+  }
+  reset();
+
+  $("#w-start").onchange = () => { if (!editing && $("#w-start").value) $("#w-end").value = addDays($("#w-start").value, 6); };
+  $("#w-cancel").onclick = reset;
+  $("#weeks-table").onclick = async e => {
+    const editId = Number(e.target.dataset.edit), delId = Number(e.target.dataset.delete);
+    if (editId) {
+      editing = weeks.find(w => w.id === editId);
+      $("#w-label").value = editing.label;
+      $("#w-start").value = editing.start;
+      $("#w-end").value = editing.end;
+      $("#w-submit").textContent = "Save changes";
+      $("#w-cancel").classList.remove("hidden");
+      $("#w-label").focus();
+    }
+    if (delId) {
+      const w = weeks.find(w => w.id === delId);
+      if (!confirm(`Delete ${weekName(w)}? Any hours students logged for it will be deleted too.`)) return;
+      await api(`admin/weeks/${delId}`, { method: "DELETE" });
+      renderAdmin();
+    }
+  };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    err.textContent = "";
+    const body = { label: $("#w-label").value, start: $("#w-start").value, end: $("#w-end").value };
+    try {
+      await api(editing ? `admin/weeks/${editing.id}` : "admin/weeks", { method: "POST", body });
+      renderAdmin();
+    } catch (ex) { err.textContent = ex.message; }
+  };
+}
+
+async function showStudent(id) {
+  const { user, weeks, entries } = await api(`admin/users/${id}/entries`);
+  const panel = $("#detail");
+  panel.classList.remove("hidden");
+  $("#detail-title").textContent = `${user.name} — ${hrs(Object.values(entries).reduce((s, e) => s + e.hours, 0))} h total`;
+  const actions = $("#detail-actions");
+  actions.innerHTML = user.id === me.id ? "" : `
+    <button class="ghost small" id="toggle-admin">${user.is_admin ? "Remove admin" : "Make admin"}</button>
+    <button class="ghost small" id="reset-pw">Reset password</button>
+    <span class="muted" id="detail-msg" style="font-size:13px"></span>`;
+  if (user.id !== me.id) {
+    $("#toggle-admin").onclick = async () => {
+      if (!confirm(`${user.is_admin ? "Remove admin access from" : "Give admin access to"} ${user.name}?`)) return;
+      await api(`admin/users/${id}/role`, { method: "POST", body: { is_admin: !user.is_admin } });
+      await renderAdmin(); showStudent(id);
+    };
+    $("#reset-pw").onclick = async () => {
+      const pw = prompt(`New password for ${user.name} (min 8 characters):`);
+      if (!pw) return;
+      try { await api(`admin/users/${id}/password`, { method: "POST", body: { password: pw } }); $("#detail-msg").textContent = "Password updated."; }
+      catch (ex) { $("#detail-msg").textContent = ex.message; }
+    };
+  }
+  const shown = weeks.filter(started).reverse();
+  $("#detail-weeks").innerHTML = shown.map(w => {
+    const e = entries[w.id];
+    return `
+      <div class="week">
+        <div class="week-head">
+          <strong>${esc(weekName(w))} <span class="muted" style="font-weight:400;font-size:13px">${range(w)}</span></strong>
+          <span class="total">${e ? `${hrs(e.hours)} h` : '<span class="muted">not logged</span>'}</span>
+        </div>
+        ${e ? `<div class="desc">${esc(e.description)}</div>` : ""}
+      </div>`;
+  }).join("") || `<p class="muted">No weeks have started yet.</p>`;
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ---------- boot ----------
+api("me").then(d => { me = d.user; if (me?.is_admin) view = "admin"; render(); }).catch(() => render());
+</script>
+</body>
+</html>

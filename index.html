@@ -138,6 +138,7 @@
         <option value="name">Name</option>
         <option value="week">Hours in selected week</option>
         <option value="total">Total hours</option>
+        <option value="login">Last sign-in</option>
       </select>
       <button class="ghost small" id="export">Export CSV</button>
       <button class="small" id="add-people">Add people</button>
@@ -270,6 +271,23 @@ const range = w => `${short(w.start)} – ${fmt(w.end, { month: "short", day: "n
 const weekName = w => w.label || `Week of ${short(w.start)}`;
 const hrs = n => (Math.round(n * 100) / 100).toString();
 const stat = (v, l) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`;
+// "5 min ago", "yesterday", "Oct 3" — for last sign-in times (ms since 1970).
+function ago(ms) {
+  const min = Math.round((Date.now() - ms) / 60000);
+  if (min < 2) return "just now";
+  if (min < 60) return `${min} min ago`;
+  if (min < 60 * 24) return `${Math.round(min / 60)} h ago`;
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(ms).setHours(0, 0, 0, 0)) / 864e5);
+  if (days <= 1) return "yesterday";
+  if (days < 7) return `${days} days ago`;
+  return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric", year: new Date(ms).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+}
+const exactTime = ms => new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+// Last sign-in for a person: relative time with the exact time on hover.
+function lastSeen(p) {
+  if (p.last_login) return `<span title="${esc(exactTime(p.last_login))}">${ago(p.last_login)}</span>`;
+  return p.signed_in ? '<span class="muted" title="Signed in before sign-in times were recorded">earlier</span>' : '<span class="muted">never</span>';
+}
 const started = w => w.start <= today();
 const isCurrent = w => w.start <= today() && today() <= w.end;
 // The week happening now, or else the most recent one that has started, or else the first.
@@ -462,6 +480,7 @@ async function renderAdmin(prefetched) {
     const sorted = [...shown].sort((a, b) =>
       adminSort === "week" ? wkHours(b) - wkHours(a) :
       adminSort === "total" ? b.total - a.total :
+      adminSort === "login" ? (b.last_login || 0) - (a.last_login || 0) :
       a.name.localeCompare(b.name));
     const logged = shown.filter(s => wkHours(s) > 0).length;
     const weekTotal = shown.reduce((t, s) => t + wkHours(s), 0);
@@ -472,16 +491,17 @@ async function renderAdmin(prefetched) {
       stat(logged ? hrs(weekTotal / logged) : "0", "Average per student who logged");
 
     $("#overview").innerHTML = `
-      <thead><tr><th>Student</th>${adminSection ? "" : "<th>Section</th>"}
+      <thead><tr><th>Student</th>${adminSection ? "" : "<th>Section</th>"}<th>Last sign-in</th>
         ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
         <th class="num">Total</th></tr></thead>
       <tbody>${sorted.map(s => `
         <tr class="clickable" data-user="${esc(s.email)}">
-          <td>${s.signed_in ? esc(s.name) + " " : ""}<span class="muted">${esc(s.email)}</span>${s.signed_in ? "" : '<span class="badge">not signed in yet</span>'}</td>
+          <td>${s.signed_in ? esc(s.name) + " " : ""}<span class="muted">${esc(s.email)}</span></td>
           ${adminSection ? "" : `<td>${esc(s.section)}</td>`}
+          <td>${lastSeen(s)}</td>
           ${weeks.map(w => { const v = s.hours[w.id] || 0; return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}</td>`; }).join("")}
           <td class="num"><strong>${hrs(s.total)}</strong></td>
-        </tr>`).join("") || `<tr><td colspan="${weeks.length + 3}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
+        </tr>`).join("") || `<tr><td colspan="${weeks.length + 4}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
       </tbody>`;
   }
 
@@ -497,8 +517,9 @@ async function renderAdmin(prefetched) {
   $("#export").onclick = () => {
     const q = v => `"${String(v).replace(/"/g, '""')}"`;
     const rows = students.filter(s => !adminSection || s.section === adminSection);
-    const lines = [["Name", "Email", "Section", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
-    for (const s of rows) lines.push([s.signed_in ? s.name : "", s.email, s.section, ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
+    const stamp = ms => { const d = new Date(ms); return `${isoDay(d)} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+    const lines = [["Name", "Email", "Section", "Last sign-in", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
+    for (const s of rows) lines.push([s.signed_in ? s.name : "", s.email, s.section, s.last_login ? stamp(s.last_login) : (s.signed_in ? "" : "never"), ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/csv" }));
     a.download = `apw-hours-${adminSection ? adminSection.replace(/\s+/g, "-").toLowerCase() + "-" : ""}${today()}.csv`;
@@ -520,7 +541,7 @@ function setupClassList(people, sections) {
     <div>
       <h3>${esc(g.title)} <span class="muted" style="font-weight:400">(${g.members.length})</span></h3>
       <ul>${g.members.sort((a, b) => a.email.localeCompare(b.email)).map(p => `
-        <li><span title="${esc(p.email)}">${esc(p.email)}</span>
+        <li><span title="${esc(p.email)}">${esc(p.email)} <small class="muted">· ${lastSeen(p)}</small></span>
           ${g.key === "admin" && p.email === me.email ? '<span class="muted" style="font-size:12px">you</span>'
             : `<button class="danger small" data-remove="${esc(p.email)}" data-group="${esc(g.key)}" aria-label="Remove ${esc(p.email)}">Remove</button>`}</li>`).join("")
         || '<li><span class="muted">Nobody yet</span></li>'}</ul>
@@ -631,7 +652,7 @@ async function showStudent(email) {
     ? { user: local, weeks: last.overview.weeks, entries: local.entries }
     : await api("userEntries", { email });
   $("#detail-title").textContent = `${user.name} — ${hrs(Object.values(entries).reduce((s, e) => s + e.hours, 0))} h total`;
-  $("#detail-actions").innerHTML = `<span class="muted" style="font-size:13px">${esc(user.email)}${user.section ? ` · ${esc(user.section)}` : ""}${user.is_admin ? " · admin" : ""}</span>`;
+  $("#detail-actions").innerHTML = `<span class="muted" style="font-size:13px">${esc(user.email)}${user.section ? ` · ${esc(user.section)}` : ""}${user.is_admin ? " · admin" : ""} · last signed in ${user.last_login ? `<span title="${esc(exactTime(user.last_login))}">${ago(user.last_login)}</span>` : (user.signed_in === false ? "never" : "before times were recorded")}</span>`;
   const shown = weeks.filter(started).reverse();
   $("#detail-weeks").innerHTML = shown.map(w => {
     const e = entries[w.id];

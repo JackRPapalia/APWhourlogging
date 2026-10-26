@@ -13,7 +13,7 @@
  * Other data:
  *   - the first tab:  Username, Name, Week, Hours, Notes  (one row per student per week;
  *                     Username is the student's email, Week is the week's start date)
- *   - "Users":        Email, Name, Joined                 (created automatically; names
+ *   - "Users":        Email, Name, Joined, Last login     (created automatically; names
  *                     come from people's Google accounts the first time they sign in)
  *   - "Weeks":        Id, Label, Start, End, Auto         (created automatically)
  * If the Admins tab is empty, the first person to sign in is added to it.
@@ -29,7 +29,11 @@ const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
 const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes'];
-const USERS_HEADERS = ['Email', 'Name', 'Joined'];
+const USERS_HEADERS = ['Email', 'Name', 'Joined', 'Last login'];
+// Tabs the app manages itself: a missing column header is added instead of reported.
+const OWN_TABS = [USERS_SHEET, 'Weeks'];
+// Opening the site again within this long doesn't rewrite the last-login time.
+const LOGIN_EVERY_MS = 5 * 60 * 1000;
 const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto'];
 
 function doGet() {
@@ -91,7 +95,8 @@ function lock_() {
 }
 
 function route_(body, auth) {
-  const me = registerUser_(auth, body.name);
+  // Loading the page ("me") counts as signing in; saves and other actions don't.
+  const me = registerUser_(auth, body.name, body.action === 'me');
   const requireAdmin = () => { if (!me.is_admin) fail_('Admins only'); };
   switch (body.action) {
     case 'me': {
@@ -154,8 +159,9 @@ function verifyToken_(idToken) {
   return auth;
 }
 
-// Lets the user in only if they're on a roster tab, and records their name the first time.
-function registerUser_(auth, name) {
+// Lets the user in only if they're on a roster tab, records their name the first time,
+// and (when `signingIn`) when they last signed in.
+function registerUser_(auth, name, signingIn) {
   let access = access_(auth.email);
   if (!access.is_admin && !access.section && rosterEmails_(ADMINS_SHEET).length === 0) {
     lock_();
@@ -175,6 +181,15 @@ function registerUser_(auth, name) {
     if (!row) writeRow_(t, null, { email: auth.email, name: cleanName || auth.email.split('@')[0], joined: today_() });
     else if (!row.name && cleanName) writeRow_(t, row._row, { name: cleanName });
     row = find();
+  }
+  if (signingIn && row) {
+    const prev = loginMs_(row['last login']);
+    if (!prev || Date.now() - prev > LOGIN_EVERY_MS) {
+      // Only this person's own cell changes, so no lock is needed; the leading ' keeps it as text.
+      const t = table_(USERS_SHEET, USERS_HEADERS);
+      t.sh.getRange(row._row, t.cols['last login'] + 1).setValue("'" + Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'));
+      changed_();
+    }
   }
   return { email: auth.email, name: String((row && row.name) || auth.email), is_admin: access.is_admin, section: access.section };
 }
@@ -438,7 +453,12 @@ function overview_() {
   // Descriptions are included so the admin page can open a student's weeks without another request.
   const hours = hoursByUser_(weeks);
   const names = {};
-  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || ''); });
+  const logins = {};
+  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => {
+    const email = String(r.email).toLowerCase();
+    names[email] = String(r.name || '');
+    logins[email] = loginMs_(r['last login']);
+  });
   const admins = rosterEmails_(ADMINS_SHEET);
   const people = {};
   const person = email => (people[email] = people[email] || { email, section: '', is_admin: false });
@@ -454,6 +474,7 @@ function overview_() {
     return Object.assign(people[email], {
       name: names[email] || email,
       signed_in: email in names,
+      last_login: logins[email] || null, // ms since 1970, or null if not recorded yet
       hours: per,
       entries: hours[email] || {},
       total: Math.round(total * 100) / 100,
@@ -469,7 +490,7 @@ function userEntries_(email) {
   const row = table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === email);
   const weeks = listWeeks_();
   return {
-    user: { email, name: String((row && row.name) || email), is_admin: access.is_admin, section: access.section },
+    user: { email, name: String((row && row.name) || email), is_admin: access.is_admin, section: access.section, signed_in: !!row, last_login: row ? loginMs_(row['last login']) : null },
     weeks,
     entries: entriesFor_(email, weeks),
   };
@@ -502,6 +523,16 @@ function readTable_(name, headers) {
   values.forEach(r => { while (r.length < width) r.push(''); });
   const header = values[0].map(h => String(h).trim().toLowerCase());
   const cols = {};
+  const missing = headers.filter(h => header.indexOf(h.toLowerCase()) === -1);
+  if (missing.length && OWN_TABS.some(t => t.toLowerCase() === String(name).toLowerCase())) {
+    // A newer version of the app added a column: add its header after the last used one.
+    lock_();
+    let used = header.length;
+    while (used > 0 && header[used - 1] === '') used--;
+    sh.getRange(1, used + 1, 1, missing.length).setValues([missing]).setFontWeight('bold');
+    changed_();
+    return readTable_(name, headers);
+  }
   headers.forEach(h => {
     const i = header.indexOf(h.toLowerCase());
     if (i === -1) fail_(`The "${sh.getName()}" tab is missing a "${h}" column header`);
@@ -559,6 +590,20 @@ function tz_() {
 
 function today_() {
   return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+}
+
+// A "Last login" cell as ms since 1970, or null. Written as "yyyy-MM-dd HH:mm" text.
+function loginMs_(v) {
+  if (v === '' || v == null) return null;
+  if (Object.prototype.toString.call(v) === '[object Date]' || typeof v.getTime === 'function') return v.getTime();
+  const s = String(v).trim();
+  for (const pattern of ['yyyy-MM-dd HH:mm', 'yyyy-MM-dd']) {
+    try {
+      const d = Utilities.parseDate(s, tz_(), pattern);
+      if (d && !isNaN(d.getTime())) return d.getTime();
+    } catch (e) { /* try the next pattern */ }
+  }
+  return null;
 }
 
 // Dates typed into the sheet by hand come in many shapes; turn the common ones into

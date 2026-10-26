@@ -19,7 +19,7 @@ Weekly hours logging for an advanced programming class, hosted on GitHub Pages.
 | --- | --- | --- |
 | first tab | `Username, Name, Week, Hours, Notes` | One row per student per week. `Username` is the student's email, and `Week` is the week's start date. |
 | `Admins`, `Section 1`, `Section 2` | email addresses in column A | The class list. A header row, blank rows and `mailto:` links are fine. Edit it here or from the admin panel. If `Admins` is ever empty, the next person to sign in is added to it, so you can't lock yourself out. |
-| `Users` | `Email, Name, Joined` | Created automatically. It records each person's name from Google the first time they sign in. |
+| `Users` | `Email, Name, Joined, Last login` | Created automatically. It records each person's name from Google the first time they sign in, and when they last opened the site. |
 | `Weeks` | `Id, Label, Start, End, Auto` | Created automatically. Manage weeks from the admin panel. |
 
 You can type or edit hours rows directly in the sheet. A row counts toward whichever week contains its `Week` date. Deleting a week in the app doesn't delete its rows from the sheet; they just stop showing until a week covers their date again.

@@ -2,25 +2,27 @@
 
 Weekly hours logging for an advanced programming class, hosted on GitHub Pages.
 
-- **Login** uses Firebase Authentication with Google sign-in only. Students use their Google (e.g. school) accounts, so there are no passwords to manage.
+- **Login** uses Firebase Authentication with Google sign-in only. The account picker suggests @trevor.org accounts first, and there's a link for people on other domains. There are no passwords to manage.
 - **Data** lives in a Google Sheet. A Google Apps Script ([`apps_script.gs`](apps_script.gs)) is the backend. It checks every request's Firebase login with Google before it reads or writes anything.
 - **Only people on the class list can sign in.** The list lives in the sheet's `Admins`, `Section 1` and `Section 2` tabs. Admins can add and remove people from the admin panel.
 
 ## How it works
 
 - **Admins set the weeks.** Each week has a start date, an end date and an optional label (e.g. "Week 5"). Weeks can be any length, but they can't overlap. If no week covers today, one is created automatically for this Monday–Sunday, so students always have somewhere to log hours. Admins can edit that week, or replace it with their own week if no one has logged hours in it yet.
-- **Students log one total per week.** For every week that has started, a student enters their total hours and what they worked on. They can update or clear it any time.
-- **The admin panel** shows every student's hours for every week, with stats for the selected week. Admins can filter by section, sort, export a CSV, and click a student to read their weekly notes. Students who haven't signed in yet are marked.
+- **Students log one total per week.** For every week that has started, a student enters their total hours and what they worked on, and sees a chart of their hours per week.
+- **Deadlines.** Students can change a week until a set number of days after it ends (2 by default; change it in the admin panel's Weeks section, or turn it off). After that the week is closed to them. Admins can still change any week. Entries saved after the week ended are marked *late*.
+- **The admin panel** shows every student's hours for every week, with stats for the selected week. Admins can filter by section, sort, export a CSV, and see a chart of class hours per week. Under the chart is a list of students who haven't logged the selected week, with buttons to email them (BCC) or copy their addresses. Clicking a student shows their weekly notes, when each was last updated and by whom, and lets an admin correct or clear any week.
 - **The class list** (in the admin panel) adds emails to Section 1, Section 2 or Admin, one at a time or by pasting a whole list. A student can only be in one section, so adding them to a section moves them out of the other. Removing someone from every list stops them signing in, but their logged hours stay in the sheet.
 
 ## The spreadsheet
 
 | Tab | Columns | Notes |
 | --- | --- | --- |
-| first tab | `Username, Name, Week, Hours, Notes` | One row per student per week. `Username` is the student's email, and `Week` is the week's start date. |
+| first tab | `Username, Name, Week, Hours, Notes, Updated, Updated by` | One row per student per week. `Username` is the student's email, and `Week` is the week's start date. `Updated` and `Updated by` are filled in on every save; they're added automatically if missing. |
 | `Admins`, `Section 1`, `Section 2` | email addresses in column A | The class list. A header row, blank rows and `mailto:` links are fine. Edit it here or from the admin panel. If `Admins` is ever empty, the next person to sign in is added to it, so you can't lock yourself out. |
 | `Users` | `Email, Name, Joined, Last login` | Created automatically. It records each person's name from Google the first time they sign in, and when they last opened the site. |
 | `Weeks` | `Id, Label, Start, End, Auto` | Created automatically. Manage weeks from the admin panel. |
+| `Settings` | `Key, Value` | Created automatically. `grace_days` is how many days after a week ends students can still change it (`none` for no deadline). |
 
 You can type or edit hours rows directly in the sheet. A row counts toward whichever week contains its `Week` date. Deleting a week in the app doesn't delete its rows from the sheet; they just stop showing until a week covers their date again.
 

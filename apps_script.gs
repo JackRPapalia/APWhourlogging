@@ -28,10 +28,16 @@ const ADMINS_SHEET = 'Admins';
 const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
-const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes'];
+const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by'];
 const USERS_HEADERS = ['Email', 'Name', 'Joined', 'Last login'];
 // Tabs the app manages itself: a missing column header is added instead of reported.
-const OWN_TABS = [USERS_SHEET, 'Weeks'];
+const OWN_TABS = [USERS_SHEET, 'Weeks', 'Settings'];
+// Columns added by newer versions of the app; they're added to any tab that lacks them.
+const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by'];
+const SETTINGS_SHEET = 'Settings';
+const SETTINGS_HEADERS = ['Key', 'Value'];
+// Students can change a week until this many days after it ends, unless the admin changes it.
+const DEFAULT_GRACE_DAYS = 2;
 // Opening the site again within this long doesn't rewrite the last-login time.
 const LOGIN_EVERY_MS = 5 * 60 * 1000;
 const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto'];
@@ -50,7 +56,7 @@ function authorize() {
 
 // Actions that change the sheet. They take the script lock up front; everything else
 // only reads, so many students can load the page at once without queueing.
-const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'saveWeek', 'deleteWeek', 'addUsers', 'removeUser'];
+const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'saveWeek', 'deleteWeek', 'addUsers', 'removeUser', 'saveSettings'];
 
 // Per-request state: tab reads are remembered until something is written (each Sheets
 // call is slow), and the lock is only held when this request needs to write.
@@ -101,17 +107,25 @@ function route_(body, auth) {
   switch (body.action) {
     case 'me': {
       const weeks = listWeeks_();
-      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks) };
+      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks), settings: settings_() };
       // Admins land on the admin panel, so send its data now and save a second (slow) round trip.
       if (me.is_admin && body.withOverview) result.overview = overview_();
       return result;
     }
     case 'saveEntry':
-      saveEntry_(me, body);
-      return { entries: entriesFor_(me.email, listWeeks_()) };
-    case 'deleteEntry':
-      deleteEntry_(me, body);
-      return { entries: entriesFor_(me.email, listWeeks_()) };
+    case 'deleteEntry': {
+      // Admins can correct anyone's week by passing their email.
+      const target = entryTarget_(me, body);
+      if (body.action === 'saveEntry') saveEntry_(me, target, body);
+      else deleteEntry_(me, target, body);
+      const result = { entries: entriesFor_(target.email, listWeeks_()) };
+      if (target.email !== me.email) result.overview = overview_();
+      return result;
+    }
+    case 'saveSettings':
+      requireAdmin();
+      saveSettings_(body);
+      return { settings: settings_(), weeks: listWeeks_(), overview: overview_() };
     case 'overview':
       requireAdmin();
       return overview_();
@@ -330,8 +344,47 @@ function listWeeks_() {
     ensureCurrentWeek_();
     return weekRows_(table_(WEEKS_SHEET, WEEKS_HEADERS))
       .sort((a, b) => (a.start < b.start ? -1 : 1))
-      .map(w => ({ id: w.id, label: w.label, start: w.start, end: w.end }));
+      .map(w => ({ id: w.id, label: w.label, start: w.start, end: w.end, due: dueDate_(w) }));
   });
+}
+
+// Last day students can change a week (yyyy-mm-dd), or null when there's no deadline.
+function dueDate_(week) {
+  const grace = settings_().grace_days;
+  return grace === null ? null : addDays_(week.end, grace);
+}
+
+function isClosed_(week) {
+  return !!week.due && today_() > week.due;
+}
+
+// ---------- settings ----------
+
+function settings_() {
+  return memo_('settings', () => {
+    const out = { grace_days: DEFAULT_GRACE_DAYS };
+    table_(SETTINGS_SHEET, SETTINGS_HEADERS).rows.forEach(r => {
+      if (String(r.key).trim().toLowerCase() !== 'grace_days') return;
+      const v = String(r.value).trim().toLowerCase();
+      const n = Math.round(Number(v));
+      out.grace_days = v === '' || v === 'none' ? null : (isFinite(n) && n >= 0 ? n : DEFAULT_GRACE_DAYS);
+    });
+    return out;
+  });
+}
+
+function saveSettings_(body) {
+  const v = body.grace_days;
+  let value;
+  if (v === null || v === 'none') value = 'none';
+  else {
+    const n = Math.round(Number(v));
+    if (!isFinite(n) || n < 0 || n > 60) fail_('Pick a number of days between 0 and 60');
+    value = String(n);
+  }
+  const t = table_(SETTINGS_SHEET, SETTINGS_HEADERS);
+  const row = t.rows.find(r => String(r.key).trim().toLowerCase() === 'grace_days');
+  writeRow_(t, row ? row._row : null, { key: 'grace_days', value });
 }
 
 function nextId_(weeks) {
@@ -409,7 +462,15 @@ function hoursByUser_(weeks) {
     const week = weekFor_(weeks, toIso_(r.week));
     const hours = Number(r.hours);
     if (!email || !week || r.hours === '' || !isFinite(hours)) return;
-    (out[email] = out[email] || {})[week.id] = { week_id: week.id, hours, description: String(r.notes) };
+    const updated = loginMs_(r.updated);
+    const updatedBy = String(r['updated by'] || '').trim().toLowerCase();
+    const updatedDay = typeof r.updated === 'string' ? toIso_(r.updated.slice(0, 10)) : toIso_(r.updated);
+    (out[email] = out[email] || {})[week.id] = {
+      week_id: week.id, hours, description: String(r.notes),
+      updated, updated_by: updatedBy || null,
+      // Logged by the student after the week was over (during the grace period).
+      late: !!updated && (!updatedBy || updatedBy === email) && updatedDay > week.end,
+    };
   });
   return out;
 }
@@ -425,23 +486,48 @@ function userWeekRows_(t, email, week) {
     .map(r => r._row);
 }
 
-function saveEntry_(me, body) {
+// Whose week is being changed: yourself, or (admins only) the student named by body.email.
+function entryTarget_(me, body) {
+  const email = cleanEmail_(body.email);
+  if (!email || email === me.email) return me;
+  if (!me.is_admin) fail_('Admins only');
+  const access = access_(email);
+  if (!access.is_admin && !access.section) fail_(`${email} isn't on the class list`);
+  const row = table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === email);
+  return { email, name: String((row && row.name) || email) };
+}
+
+function closedMessage_(week) {
+  return `${week.label || 'That week'} closed on ${week.due}. Ask your teacher if it needs changing.`;
+}
+
+function stamp_() {
+  return "'" + Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd HH:mm'); // leading ' keeps it as text
+}
+
+function saveEntry_(me, target, body) {
   const week = findWeek_(body.week_id);
   if (week.start > today_()) fail_("That week hasn't started yet");
+  if (!me.is_admin && isClosed_(week)) fail_(closedMessage_(week));
   const hours = Math.round(Number(body.hours) * 100) / 100;
   if (!isFinite(hours) || hours <= 0 || hours > 100) fail_('Weekly hours must be between 0 and 100');
   const notes = String(body.description || '').trim();
   if (!notes) fail_('Describe what you worked on this week');
   if (notes.length > 2000) fail_('Description is too long (2000 characters max)');
   const t = table_(HOURS_SHEET, HOURS_HEADERS);
-  const rows = userWeekRows_(t, me.email, week);
-  writeRow_(t, rows[0] || null, { username: me.email, name: me.name, week: week.start, hours, notes });
+  const rows = userWeekRows_(t, target.email, week);
+  writeRow_(t, rows[0] || null, {
+    username: target.email, name: target.name, week: week.start, hours, notes,
+    updated: stamp_(), 'updated by': me.email,
+  });
   deleteRows_(t, rows.slice(1)); // drop duplicates for the same week
 }
 
-function deleteEntry_(me, body) {
+function deleteEntry_(me, target, body) {
+  const week = findWeek_(body.week_id);
+  if (!me.is_admin && isClosed_(week)) fail_(closedMessage_(week));
   const t = table_(HOURS_SHEET, HOURS_HEADERS);
-  deleteRows_(t, userWeekRows_(t, me.email, findWeek_(body.week_id)));
+  deleteRows_(t, userWeekRows_(t, target.email, week));
 }
 
 // ---------- admin views ----------
@@ -480,7 +566,7 @@ function overview_() {
       total: Math.round(total * 100) / 100,
     });
   });
-  return { weeks, students, sections: SECTIONS };
+  return { weeks, students, sections: SECTIONS, settings: settings_() };
 }
 
 function userEntries_(email) {
@@ -524,7 +610,8 @@ function readTable_(name, headers) {
   const header = values[0].map(h => String(h).trim().toLowerCase());
   const cols = {};
   const missing = headers.filter(h => header.indexOf(h.toLowerCase()) === -1);
-  if (missing.length && OWN_TABS.some(t => t.toLowerCase() === String(name).toLowerCase())) {
+  const ownTab = OWN_TABS.some(t => t.toLowerCase() === String(name).toLowerCase());
+  if (missing.length && (ownTab || missing.every(h => OPTIONAL_HEADERS.indexOf(h) !== -1))) {
     // A newer version of the app added a column: add its header after the last used one.
     lock_();
     let used = header.length;

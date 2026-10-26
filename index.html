@@ -14,11 +14,13 @@
   :root {
     --bg: #f5f6f8; --card: #fff; --text: #1c1f24; --muted: #646b75; --border: #dde1e6;
     --accent: #2f5bd3; --accent-soft: #e8eefc; --danger: #c23a3a; --ok: #1d7a46;
+    --chart: #2f5bd3; /* bar color, checked with the dataviz palette validator */
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #14161a; --card: #1c1f25; --text: #e7e9ec; --muted: #9aa1ab; --border: #2e333b;
       --accent: #7f9ef5; --accent-soft: #232c44; --danger: #ef7d7d; --ok: #6fcf97;
+      --chart: #6b8cef; /* the dark accent is too light for chart marks */
     }
   }
   * { box-sizing: border-box; }
@@ -35,6 +37,7 @@
   input, textarea, select { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); }
   textarea { resize: vertical; min-height: 60px; }
   button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  a.button { display: inline-block; font-size: 13px; padding: 4px 10px; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; border: 1px solid var(--accent); }
   button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   button.small { padding: 4px 10px; font-size: 13px; }
@@ -84,13 +87,28 @@
   body { min-height: 100vh; display: flex; flex-direction: column; }
   main { flex: 1; width: 100%; }
   .credits { text-align: center; color: var(--muted); font-size: 12px; padding: 8px 16px 24px; }
+  .chart { width: 100%; min-height: 40px; margin-bottom: 8px; }
+  .chart svg { display: block; overflow: visible; }
+  .chart .bar { fill: var(--chart); }
+  .chart .bar.dim { opacity: .45; }
+  .chart .hit { fill: transparent; cursor: pointer; }
+  .chart .hit:hover + .bar, .chart .hit:focus + .bar { opacity: 1; }
+  .chart .grid { stroke: var(--border); stroke-width: 1; }
+  .chart .tick { fill: var(--muted); font-size: 11px; }
+  .chart .value { fill: var(--text); font-size: 11px; font-weight: 600; }
+  .chart-title { font-size: 13px; font-weight: 600; margin: 4px 0 6px; }
+  .missing { border-top: 1px solid var(--border); padding-top: 12px; margin: 8px 0 14px; font-size: 14px; }
+  .missing .who { color: var(--muted); margin: 4px 0 8px; word-break: break-word; }
+  .closed-entry { display: grid; grid-template-columns: 120px 1fr; gap: 12px; font-size: 14px; }
+  .late { color: var(--danger); }
+  .detail-edit { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: start; margin-top: 8px; }
   .loading { text-align: center; color: var(--muted); padding: 60px 0; }
   .hidden { display: none !important; }
   @media (max-width: 640px) {
     .week-form { grid-template-columns: 1fr; }
     .week-editor { grid-template-columns: 1fr 1fr; }
     .week-editor .label-field, .week-editor .btns { grid-column: 1 / -1; }
-    .roster-form, .roster-lists { grid-template-columns: 1fr; }
+    .roster-form, .roster-lists, .closed-entry, .detail-edit { grid-template-columns: 1fr; }
     header { flex-wrap: wrap; }
   }
 </style>
@@ -115,6 +133,7 @@
     <h2>APW Hours Log</h2>
     <p class="muted" style="font-size:14px;margin:-6px 0 18px">Sign in with your Google account to log your hours.</p>
     <button type="button" id="google" style="width:100%">Sign in with Google</button>
+    <p style="text-align:center;margin:10px 0 0"><button type="button" class="ghost small" id="google-other" style="border:0;color:var(--muted)">Not a @trevor.org account? Use another Google account</button></p>
     <div class="error" id="auth-error"></div>
   </div>
 </template>
@@ -124,8 +143,12 @@
     <div class="stat-row" id="my-stats" style="margin:0"></div>
   </div>
   <div class="card">
+    <h2>Your hours per week</h2>
+    <div class="chart" id="my-chart"></div>
+  </div>
+  <div class="card">
     <h2>My weekly hours</h2>
-    <p class="muted" style="font-size:13px;margin:-6px 0 14px">Enter your total hours for each week and what you worked on. You can update a week any time.</p>
+    <p class="muted" style="font-size:13px;margin:-6px 0 14px">Enter your total hours for each week and what you worked on. You can change a week until its due date.</p>
     <div id="my-weeks"></div>
   </div>
 </template>
@@ -150,8 +173,11 @@
       <button class="small" id="add-people">Add people</button>
     </div>
     <div class="stat-row" id="class-stats"></div>
+    <h3 class="chart-title">Class hours per week <span class="muted" id="chart-scope"></span></h3>
+    <div class="chart" id="class-chart"></div>
+    <div class="missing" id="missing"></div>
     <div class="table-wrap"><table id="overview"></table></div>
-    <p class="muted" style="font-size:13px;margin:10px 0 0">Click a student to see what they wrote for each week.</p>
+    <p class="muted" style="font-size:13px;margin:10px 0 0">Click a student to see what they wrote for each week, or to correct it. <span class="late">•</span> logged after the week ended.</p>
   </div>
   <div class="card hidden" id="detail">
     <div class="week-head">
@@ -175,6 +201,18 @@
   <div class="card">
     <h2>Weeks</h2>
     <p class="muted" style="font-size:13px;margin:-6px 0 14px">Set the date range for each week. Students can log hours for a week once its start date arrives.</p>
+    <div class="toolbar hidden" id="deadline-row">
+      <label for="grace">Students can change a week until</label>
+      <select id="grace">
+        <option value="none">any time (no deadline)</option>
+        <option value="0">the day it ends</option>
+        <option value="1">1 day after it ends</option>
+        <option value="2">2 days after it ends</option>
+        <option value="3">3 days after it ends</option>
+        <option value="7">a week after it ends</option>
+      </select>
+      <span class="muted" id="deadline-msg" style="font-size:13px"></span>
+    </div>
     <div class="table-wrap"><table id="weeks-table"></table></div>
     <form id="week-editor" class="week-editor">
       <div class="label-field"><label for="w-label">Label (optional)</label><input id="w-label" maxlength="60" placeholder="e.g. Week 5 or Project sprint"></div>
@@ -194,6 +232,7 @@ import {
 import { firebaseConfig, SCRIPT_URL } from "./config.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
+const SCHOOL_DOMAIN = "trevor.org";
 const app = $("#app");
 let me = null;
 let view = "student";
@@ -295,6 +334,46 @@ function lastSeen(p) {
   return p.signed_in ? '<span class="muted" title="Signed in before sign-in times were recorded">earlier</span>' : '<span class="muted">never</span>';
 }
 const started = w => w.start <= today();
+// A week is closed to students once its due date (end + grace days) has passed. Admins can always edit.
+const isClosed = w => !!w.due && today() > w.due;
+const closedForMe = w => isClosed(w) && !me?.is_admin;
+const dueText = w => w.due ? fmt(w.due, { weekday: "short", month: "short", day: "numeric" }) : "";
+
+// Bar chart of one value per week, drawn as inline SVG at the container's width.
+// One series: no legend; the selected week is emphasized and direct-labeled; every bar has a
+// hover/focus tooltip on a hit area wider than the bar.
+function drawWeekChart(el, weeks, valueOf, { selected, tooltip, onPick } = {}) {
+  const shown = weeks.filter(started);
+  if (!shown.length) { el.innerHTML = `<p class="muted" style="font-size:13px;margin:0">No weeks have started yet.</p>`; return; }
+  const W = Math.max(280, el.clientWidth || 600), H = 150, left = 30, right = 4, top = 18, bottom = 22;
+  const vals = shown.map(valueOf);
+  const peak = Math.max(...vals, 1);
+  const mag = 10 ** Math.floor(Math.log10(peak));
+  const max = [1, 2, 2.5, 5, 10].map(m => m * mag).find(m => m >= peak);
+  const plotW = W - left - right, plotH = H - top - bottom, slot = plotW / shown.length;
+  const bw = Math.max(3, Math.min(32, slot * 0.6));
+  const y = v => top + plotH - (v / max) * plotH;
+  const every = Math.ceil(shown.length / Math.max(1, Math.floor(plotW / 56))); // thin out x labels
+  const grid = [0, max / 2, max].map(v => `
+    <line class="grid" x1="${left}" x2="${W - right}" y1="${y(v)}" y2="${y(v)}"></line>
+    <text class="tick" x="${left - 6}" y="${y(v) + 4}" text-anchor="end">${hrs(v)}</text>`).join("");
+  const bars = shown.map((w, i) => {
+    const v = vals[i], x = left + i * slot + (slot - bw) / 2, yTop = y(v), base = y(0), r = Math.min(4, bw / 2, base - yTop);
+    const path = v > 0
+      ? `M${x},${base}V${yTop + r}Q${x},${yTop} ${x + r},${yTop}H${x + bw - r}Q${x + bw},${yTop} ${x + bw},${yTop + r}V${base}Z`
+      : "";
+    const sel = selected == null || w.id === selected;
+    const tip = tooltip ? tooltip(w, v) : `${weekName(w)}: ${hrs(v)} h`;
+    return `<g>
+      <rect class="hit" x="${left + i * slot}" y="${top}" width="${slot}" height="${plotH}" data-week="${w.id}" tabindex="0" aria-label="${esc(tip)}"><title>${esc(tip)}</title></rect>
+      ${path ? `<path class="bar ${sel ? "" : "dim"}" d="${path}" pointer-events="none"></path>` : ""}
+      ${w.id === selected && v > 0 ? `<text class="value" x="${x + bw / 2}" y="${yTop - 5}" text-anchor="middle">${hrs(v)}</text>` : ""}
+      ${i % every === 0 ? `<text class="tick" x="${left + i * slot + slot / 2}" y="${H - 6}" text-anchor="middle">${esc(w.label || short(w.start))}</text>` : ""}
+    </g>`;
+  }).join("");
+  el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Hours per week">${grid}${bars}</svg>`;
+  if (onPick) el.onclick = e => { const id = e.target.dataset?.week; if (id) onPick(Number(id)); };
+}
 const isCurrent = w => w.start <= today() && today() <= w.end;
 // The week happening now, or else the most recent one that has started, or else the first.
 const defaultWeek = weeks => (weeks.find(isCurrent) || weeks.filter(started).at(-1) || weeks[0])?.id;
@@ -384,12 +463,18 @@ onAuthStateChanged(auth, async user => {
 // ---------- auth ----------
 function renderAuth() {
   app.replaceChildren($("#tpl-auth").content.cloneNode(true));
-  const err = $("#auth-error"), button = $("#google");
-  button.onclick = async () => {
+  const err = $("#auth-error");
+  // `hd` makes Google's account picker show @trevor.org accounts first; it's only a hint,
+  // so people on another domain (e.g. a staff address) use the second button.
+  const signIn = (button, params) => async () => {
     err.textContent = "";
-    try { await busy(button, "Signing in…", () => signInWithPopup(auth, new GoogleAuthProvider())); }
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account", ...params });
+    try { await busy(button, "Signing in…", () => signInWithPopup(auth, provider)); }
     catch (ex) { err.textContent = authMessage(ex); }
   };
+  $("#google").onclick = signIn($("#google"), { hd: SCHOOL_DOMAIN });
+  $("#google-other").onclick = signIn($("#google-other"), {});
 }
 
 // ---------- student ----------
@@ -407,6 +492,8 @@ async function renderStudent(data) {
     stat(hrs(total), "Total hours") +
     stat(`${Object.keys(entries).length}/${open.length}`, "Weeks logged");
 
+  drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, { selected: cur?.id });
+
   const list = $("#my-weeks");
   if (!open.length) {
     list.innerHTML = `<p class="muted">${weeks.length ? `The first week starts ${range(weeks[0])}.` : "Your teacher hasn't set up any weeks yet."}</p>`;
@@ -414,12 +501,19 @@ async function renderStudent(data) {
   }
   list.innerHTML = open.map(w => {
     const e = entries[w.id];
-    return `
-    <form class="week" data-week="${w.id}">
+    const head = `
       <div class="week-head">
-        <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}</strong>
-        <span class="muted" style="font-size:13px">${range(w)}</span>
-      </div>
+        <strong>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">this week</span>' : ""}${closedForMe(w) ? '<span class="badge warn">closed</span>' : ""}</strong>
+        <span class="muted" style="font-size:13px">${range(w)}${w.due && !closedForMe(w) ? ` · due ${dueText(w)}` : ""}</span>
+      </div>`;
+    if (closedForMe(w)) {
+      return `<div class="week">${head}
+        ${e ? `<div class="closed-entry"><strong>${hrs(e.hours)} h</strong><div class="desc">${esc(e.description)}</div></div>`
+            : `<p class="muted" style="margin:0;font-size:14px">Not logged. This week closed on ${dueText(w)}; ask your teacher if you need to add hours.</p>`}
+      </div>`;
+    }
+    return `
+    <form class="week" data-week="${w.id}">${head}
       <div class="week-form">
         <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" required></div>
         <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${e ? esc(e.description) : ""}</textarea></div>
@@ -434,7 +528,7 @@ async function renderStudent(data) {
 
   const reload = async result => {
     remember({ entries: result.entries });
-    await renderStudent({ weeks, entries: result.entries });
+    await renderStudent({ ...data, weeks, entries: result.entries });
   };
   list.onsubmit = async ev => {
     ev.preventDefault();
@@ -505,10 +599,23 @@ async function renderAdmin(prefetched) {
           <td>${s.signed_in ? esc(s.name) + " " : ""}<span class="muted">${esc(s.email)}</span></td>
           ${adminSection ? "" : `<td>${esc(s.section)}</td>`}
           <td>${lastSeen(s)}</td>
-          ${weeks.map(w => { const v = s.hours[w.id] || 0; return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}</td>`; }).join("")}
+          ${weeks.map(w => {
+            const v = s.hours[w.id] || 0, late = s.entries?.[w.id]?.late;
+            return `<td class="num ${w.id === adminWeek ? "current" : ""} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}${late ? '<span class="late" title="Logged after the week ended" aria-label="logged late"> •</span>' : ""}</td>`;
+          }).join("")}
           <td class="num"><strong>${hrs(s.total)}</strong></td>
         </tr>`).join("") || `<tr><td colspan="${weeks.length + 4}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
       </tbody>`;
+
+    const sum = w => shown.reduce((t, s) => t + (s.hours[w.id] || 0), 0);
+    const count = w => shown.filter(s => s.hours[w.id] > 0).length;
+    $("#chart-scope").textContent = adminSection ? `· ${adminSection}` : "· all sections";
+    drawWeekChart($("#class-chart"), weeks, sum, {
+      selected: adminWeek,
+      tooltip: (w, v) => `${weekName(w)}: ${hrs(v)} h from ${count(w)} of ${shown.length} students`,
+      onPick: id => { adminWeek = id; draw(); },
+    });
+    drawMissing(weeks.find(w => w.id === adminWeek), shown);
   }
 
   $("#wk-select").onchange = e => { adminWeek = Number(e.target.value); draw(); };
@@ -533,8 +640,54 @@ async function renderAdmin(prefetched) {
     URL.revokeObjectURL(a.href);
   };
   draw();
+  setupDeadline(overview.settings);
   setupClassList(people, sections);
   setupWeekEditor(weeks);
+}
+
+// Students in view with no hours for the selected week, with quick ways to remind them.
+function drawMissing(week, shown) {
+  const box = $("#missing");
+  if (!week || !started(week)) { box.innerHTML = ""; return; }
+  const missing = shown.filter(s => !(s.hours[week.id] > 0));
+  if (!missing.length) {
+    box.innerHTML = `<span class="ok">Everyone shown has logged hours for ${esc(weekName(week))}.</span>`;
+    return;
+  }
+  const emails = missing.map(s => s.email);
+  const site = location.origin + location.pathname;
+  const subject = `Log your hours for ${weekName(week)}`;
+  const body = `Hi,\n\nYou haven't logged your hours for ${weekName(week)} (${range(week)}) yet.` +
+    ` Please log them at ${site}${week.due && !isClosed(week) ? ` by ${dueText(week)}` : ""}.\n\nThanks!`;
+  box.innerHTML = `
+    <strong>${missing.length} of ${shown.length} haven't logged hours for ${esc(weekName(week))}</strong>${week.due ? ` <span class="muted">· ${isClosed(week) ? "closed" : "due"} ${dueText(week)}</span>` : ""}
+    <div class="who">${missing.map(s => esc(s.signed_in ? s.name : s.email)).join(", ")}</div>
+    <a class="button small" href="mailto:?bcc=${encodeURIComponent(emails.join(","))}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}">Email them</a>
+    <button class="ghost small" id="copy-missing">Copy emails</button>
+    <span class="muted" id="copy-msg" style="font-size:13px"></span>`;
+  $("#copy-missing").onclick = async () => {
+    try { await navigator.clipboard.writeText(emails.join(", ")); $("#copy-msg").textContent = "Copied."; }
+    catch { $("#copy-msg").textContent = emails.join(", "); }
+  };
+}
+
+// The "students can change a week until…" setting. Hidden if the script is too old to have it.
+function setupDeadline(settings) {
+  if (!settings) return;
+  $("#deadline-row").classList.remove("hidden");
+  const sel = $("#grace"), msg = $("#deadline-msg");
+  const current = settings.grace_days === null ? "none" : String(settings.grace_days);
+  if (![...sel.options].some(o => o.value === current)) sel.add(new Option(`${current} days after it ends`, current));
+  sel.value = current;
+  sel.onchange = async () => {
+    msg.className = "muted";
+    msg.textContent = "Saving…";
+    try {
+      const r = await api("saveSettings", { grace_days: sel.value === "none" ? "none" : Number(sel.value) });
+      await renderAdmin(r.overview);
+      $("#deadline-msg").textContent = "Saved.";
+    } catch (ex) { msg.className = "error"; msg.textContent = ex.message; sel.value = current; }
+  };
 }
 
 function setupClassList(people, sections) {
@@ -587,12 +740,13 @@ function setupWeekEditor(weeks) {
   const overlaps = w => weeks.filter(o => o.id !== w.id && o.start <= w.end && o.end >= w.start);
 
   $("#weeks-table").innerHTML = weeks.length ? `
-    <thead><tr><th>Week</th><th>Start</th><th>End</th><th></th></tr></thead>
+    <thead><tr><th>Week</th><th>Start</th><th>End</th><th>Students can edit until</th><th></th></tr></thead>
     <tbody>${[...weeks].reverse().map(w => `
       <tr>
         <td>${esc(weekName(w))}${isCurrent(w) ? '<span class="badge">current</span>' : ""}${overlaps(w).map(o => `<span class="badge warn">overlaps ${esc(weekName(o))}</span>`).join("")}</td>
         <td>${fmt(w.start, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
         <td>${fmt(w.end, { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</td>
+        <td>${w.due ? `${dueText(w)}${isClosed(w) ? ' <span class="muted">(closed)</span>' : ""}` : '<span class="muted">no deadline</span>'}</td>
         <td class="num"><button class="ghost small" data-edit="${w.id}">Edit</button> <button class="danger small" data-delete="${w.id}">Delete</button></td>
       </tr>`).join("")}
     </tbody>` : `<tbody><tr><td class="muted">No weeks yet. Add the first one below.</td></tr></tbody>`;
@@ -660,17 +814,55 @@ async function showStudent(email) {
   $("#detail-title").textContent = `${user.name} — ${hrs(Object.values(entries).reduce((s, e) => s + e.hours, 0))} h total`;
   $("#detail-actions").innerHTML = `<span class="muted" style="font-size:13px">${esc(user.email)}${user.section ? ` · ${esc(user.section)}` : ""}${user.is_admin ? " · admin" : ""} · last signed in ${user.last_login ? `<span title="${esc(exactTime(user.last_login))}">${ago(user.last_login)}</span>` : (user.signed_in === false ? "never" : "before times were recorded")}</span>`;
   const shown = weeks.filter(started).reverse();
+  const updatedText = e => !e.updated ? "" :
+    `<div class="muted" style="font-size:12px;margin-top:4px">Updated <span title="${esc(exactTime(e.updated))}">${ago(e.updated)}</span>${e.updated_by && e.updated_by !== user.email ? ` by ${esc(e.updated_by)}` : ""}${e.late ? ' · <span class="late">logged after the week ended</span>' : ""}</div>`;
   $("#detail-weeks").innerHTML = shown.map(w => {
     const e = entries[w.id];
     return `
-      <div class="week">
+      <div class="week" data-week="${w.id}">
         <div class="week-head">
           <strong>${esc(weekName(w))} <span class="muted" style="font-weight:400;font-size:13px">${range(w)}</span></strong>
-          <span class="total">${e ? `${hrs(e.hours)} h` : '<span class="muted">not logged</span>'}</span>
+          <span><span class="total">${e ? `${hrs(e.hours)} h` : '<span class="muted">not logged</span>'}</span>
+            <button class="ghost small" data-edit-entry="${w.id}">${e ? "Edit" : "Add"}</button></span>
         </div>
-        ${e ? `<div class="desc">${esc(e.description)}</div>` : ""}
+        ${e ? `<div class="desc">${esc(e.description)}</div>${updatedText(e)}` : ""}
+        <div class="edit-slot"></div>
       </div>`;
   }).join("") || `<p class="muted">No weeks have started yet.</p>`;
+
+  // Admin corrections: edit or clear any week for this student, even after it closes.
+  $("#detail-weeks").onclick = async ev => {
+    const editId = Number(ev.target.dataset.editEntry);
+    if (editId) {
+      const block = ev.target.closest(".week"), e = entries[editId], slot = $(".edit-slot", block);
+      slot.innerHTML = `
+        <form class="detail-edit">
+          <input name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" aria-label="Total hours" required>
+          <textarea name="description" rows="2" maxlength="2000" aria-label="What they worked on" required>${e ? esc(e.description) : ""}</textarea>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button type="submit" class="small">Save</button>
+            ${e ? '<button type="button" class="danger small" data-clear-entry>Clear</button>' : ""}
+            <button type="button" class="ghost small" data-cancel>Cancel</button>
+          </div>
+          <span class="error" style="grid-column:1/-1;margin:0;min-height:0"></span>
+        </form>`;
+      const form = $("form", slot), err = $(".error", form);
+      const done = async r => { await renderAdmin(r.overview); await showStudent(email); };
+      form.hours.focus();
+      form.onsubmit = async se => {
+        se.preventDefault();
+        try { await done(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours: form.hours.value, description: form.description.value }))); }
+        catch (ex) { err.textContent = ex.message; }
+      };
+      form.onclick = async ce => {
+        if (ce.target.matches("[data-cancel]")) slot.innerHTML = "";
+        if (ce.target.matches("[data-clear-entry]") && confirm(`Clear ${user.name}'s hours for this week?`)) {
+          try { await done(await busy(ce.target, "Clearing…", () => api("deleteEntry", { email, week_id: editId }))); }
+          catch (ex) { err.textContent = ex.message; }
+        }
+      };
+    }
+  };
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 </script>

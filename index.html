@@ -51,7 +51,10 @@
   .week:first-child { border-top: 0; padding-top: 0; }
   .week-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
   .week-head strong { font-size: 15px; }
-  .week-form { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: start; }
+  .week-form { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start; }
+  .hm { display: flex; align-items: center; gap: 6px; }
+  .hm input { width: 72px; }
+  .hm span { color: var(--muted); font-size: 13px; }
   .week-form .actions { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; }
   .week-form .status { font-size: 13px; }
   .total { font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -101,7 +104,7 @@
   .missing .who { color: var(--muted); margin: 4px 0 8px; word-break: break-word; }
   .closed-entry { display: grid; grid-template-columns: 120px 1fr; gap: 12px; font-size: 14px; }
   .late { color: var(--danger); }
-  .detail-edit { display: grid; grid-template-columns: 110px 1fr auto; gap: 8px; align-items: start; margin-top: 8px; }
+  .detail-edit { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; margin-top: 8px; }
   .check { display: flex; gap: 8px; align-items: center; grid-column: 1 / -1; font-size: 14px; color: var(--text); margin: 0; }
   .check input { width: auto; }
   .bulk { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
@@ -289,6 +292,11 @@ function forget() {
 }
 const syncing = on => $("#sync").classList.toggle("hidden", !on);
 app.addEventListener("input", () => { dirty = true; });
+// Browsers change a focused number box when you scroll over it, which makes the page hard
+// to scroll. Unfocus the box instead, so the wheel scrolls the page and the value stays put.
+document.addEventListener("wheel", e => {
+  if (e.target instanceof HTMLInputElement && e.target.type === "number" && e.target === document.activeElement) e.target.blur();
+}, { passive: true });
 
 if (firebaseConfig.apiKey.startsWith("PASTE")) {
   app.innerHTML = `<div class="card auth"><h2>Almost there</h2><p class="muted">Paste your Firebase web config into <code>config.js</code> to turn on login. See the README for the steps.</p></div>`;
@@ -367,6 +375,30 @@ const short = s => fmt(s, { month: "short", day: "numeric" });
 const range = w => `${short(w.start)} – ${fmt(w.end, { month: "short", day: "numeric", year: "numeric" })}`;
 const weekName = w => w.label || `Week of ${short(w.start)}`;
 const hrs = n => (Math.round(n * 100) / 100).toString();
+// Hours are stored as decimals (1.33); the forms use separate hours and minutes boxes.
+function splitHM(decimal) {
+  const total = Math.round((Number(decimal) || 0) * 60);
+  return { h: Math.floor(total / 60), m: total % 60 };
+}
+// Hours + minutes boxes for a form; `value` is decimal hours or empty.
+function hmInputs(id, value, label = "Time spent") {
+  const { h, m } = value ? splitHM(value) : { h: "", m: "" };
+  return `<fieldset class="hm-field" style="border:0;margin:0;padding:0;min-width:0">
+    <legend style="font-size:13px;color:var(--muted);margin-bottom:4px;padding:0">${label}</legend>
+    <div class="hm">
+      <input id="${id}-h" name="h" type="number" min="0" max="100" step="1" inputmode="numeric" value="${h}" aria-label="Hours" placeholder="0"><span>hours</span>
+      <input id="${id}-m" name="m" type="number" min="0" max="59" step="1" inputmode="numeric" value="${m}" aria-label="Minutes" placeholder="0"><span>min</span>
+    </div>
+  </fieldset>`;
+}
+// Decimal hours from a form's hours/minutes boxes, or an Error explaining what's wrong.
+function readHM(form) {
+  const h = form.h.value.trim() === "" ? 0 : Number(form.h.value), m = form.m.value.trim() === "" ? 0 : Number(form.m.value);
+  if (!Number.isInteger(h) || h < 0) return new Error("Hours must be a whole number");
+  if (!Number.isInteger(m) || m < 0 || m > 59) return new Error("Minutes must be a whole number from 0 to 59");
+  if (h === 0 && m === 0) return new Error("Enter the hours and/or minutes you spent");
+  return h + m / 60;
+}
 const stat = (v, l) => `<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`;
 // "5 min ago", "yesterday", "Oct 3" — for last sign-in times (ms since 1970).
 function ago(ms) {
@@ -578,7 +610,7 @@ async function renderStudent(data) {
     return `
     <form class="week" data-week="${w.id}">${head}${excuseNote}
       <div class="week-form">
-        <div><label for="h-${w.id}">Total hours</label><input id="h-${w.id}" name="hours" type="number" min="0.25" max="100" step="0.25" value="${logged ? logged.hours : ""}" required></div>
+        ${hmInputs(`t-${w.id}`, logged?.hours, "Total time this week")}
         <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${logged ? esc(logged.description) : ""}</textarea></div>
         <div class="actions">
           <button type="submit" class="small">${logged ? "Update" : "Save"}</button>
@@ -597,8 +629,10 @@ async function renderStudent(data) {
     ev.preventDefault();
     const form = ev.target, status = $(".status", form);
     try {
+      const hours = readHM(form);
+      if (hours instanceof Error) throw hours;
       const result = await busy(form.querySelector("button[type=submit]"), "Saving…", () =>
-        api("saveEntry", { week_id: Number(form.dataset.week), hours: form.hours.value, description: form.description.value }));
+        api("saveEntry", { week_id: Number(form.dataset.week), hours, description: form.description.value }));
       await reload(result);
     } catch (ex) { status.className = "status error"; status.style.margin = 0; status.textContent = ex.message; }
   };
@@ -979,7 +1013,7 @@ async function showStudent(email) {
       const block = ev.target.closest(".week"), e0 = entries[editId], e = e0?.excused ? null : e0, slot = $(".edit-slot", block);
       slot.innerHTML = `
         <form class="detail-edit">
-          <input name="hours" type="number" min="0.25" max="100" step="0.25" value="${e ? e.hours : ""}" aria-label="Total hours" required>
+          ${hmInputs(`a-${editId}`, e?.hours, "Time")}
           <textarea name="description" rows="2" maxlength="2000" aria-label="What they worked on" required>${e ? esc(e.description) : ""}</textarea>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button type="submit" class="small">Save</button>
@@ -990,10 +1024,14 @@ async function showStudent(email) {
         </form>`;
       const form = $("form", slot), err = $(".error", form);
       const done = async r => { await renderAdmin(r.overview); await showStudent(email); };
-      form.hours.focus();
+      form.h.focus();
       form.onsubmit = async se => {
         se.preventDefault();
-        try { await done(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours: form.hours.value, description: form.description.value }))); }
+        try {
+          const hours = readHM(form);
+          if (hours instanceof Error) throw hours;
+          await done(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours, description: form.description.value })));
+        }
         catch (ex) { err.textContent = ex.message; }
       };
       form.onclick = async ce => {

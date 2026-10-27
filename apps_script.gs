@@ -22,6 +22,10 @@
 // Your Firebase project's Web API key (Firebase console → Project settings → General → Web API key).
 const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
+// Sent with every response so the site can tell admins when this script needs redeploying.
+// Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
+const SCRIPT_VERSION = 1;
+
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
 const ADMINS_SHEET = 'Admins';
@@ -750,7 +754,8 @@ function fail_(message) {
 }
 
 function json_(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+  const body = Object.assign({ version: SCRIPT_VERSION }, obj);
+  return ContentService.createTextOutput(JSON.stringify(body)).setMimeType(ContentService.MimeType.JSON);
 }
 
 function tz_() {

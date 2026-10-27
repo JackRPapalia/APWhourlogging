@@ -110,6 +110,10 @@
   .bulk td input[type=checkbox] { width: auto; }
   th .sub.noclass, .noclass-cell { color: var(--muted); font-style: italic; }
   .excused { color: var(--muted); font-style: italic; }
+  .banner { max-width: 980px; margin: 16px auto 0; padding: 12px 16px; border: 1px solid var(--danger); border-radius: 10px; background: var(--card); font-size: 14px; width: calc(100% - 32px); }
+  .banner strong { color: var(--danger); }
+  .banner a, .card a:not(.button) { color: var(--accent); }
+  .banner ol { margin: 6px 0 0; padding-left: 20px; }
   .loading { text-align: center; color: var(--muted); padding: 60px 0; }
   .hidden { display: none !important; }
   @media (max-width: 640px) {
@@ -132,6 +136,8 @@
   <span class="who" id="who"></span>
   <button class="ghost small" id="logout">Log out</button>
 </header>
+
+<div class="banner hidden" id="script-warning" role="status"></div>
 
 <main id="app"><p class="loading">Loading…</p></main>
 
@@ -255,6 +261,10 @@ import { firebaseConfig, SCRIPT_URL } from "./config.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const SCHOOL_DOMAIN = "trevor.org";
+// The Apps Script version this page was built for (SCRIPT_VERSION in apps_script.gs).
+const EXPECTED_SCRIPT_VERSION = 1;
+const SCRIPT_FILE_URL = "https://github.com/JackRPapalia/APWhourlogging/blob/main/apps_script.gs";
+let scriptVersion = null; // from the latest response; 0 means a script from before versions existed
 const app = $("#app");
 let me = null;
 let view = "student";
@@ -307,12 +317,32 @@ async function api(action, data = {}) {
   } finally {
     clearTimeout(timer);
   }
+  scriptVersion = Number(out.version) || 0;
+  versionBanner();
   if (out.error) throw new Error(out.error);
   return fixWeeks(out);
 }
 
 // Dates typed into the sheet by hand may lack leading zeros ("2026-10-4") or use
 // month/day/year; normalize them so they sort and compare correctly as text.
+// Tells admins when the deployed Apps Script is older than this page (or, rarely, newer:
+// then the browser is showing an old copy of the page). Students can't fix it, so they don't see it.
+function versionBanner() {
+  const el = $("#script-warning");
+  const show = me?.is_admin && scriptVersion !== null && scriptVersion !== EXPECTED_SCRIPT_VERSION;
+  el.classList.toggle("hidden", !show);
+  if (!show) return;
+  el.innerHTML = scriptVersion > EXPECTED_SCRIPT_VERSION
+    ? `<strong>This page is out of date.</strong> Press ⌘⇧R (or Ctrl+Shift+R) to load the latest version.`
+    : `<strong>The Apps Script needs updating.</strong> Some features won't work until it's redeployed
+       (deployed version: ${scriptVersion || "older than 1"}, this site expects ${EXPECTED_SCRIPT_VERSION}).
+       <ol>
+         <li>Open the spreadsheet, then <b>Extensions → Apps Script</b>.</li>
+         <li>Replace all the code with the latest <a href="${SCRIPT_FILE_URL}" target="_blank" rel="noopener">apps_script.gs</a>, then save.</li>
+         <li><b>Deploy → Manage deployments</b>, click the pencil icon, choose <b>New version</b>, then <b>Deploy</b>.</li>
+       </ol>`;
+}
+
 function fixDate(v) {
   const s = String(v ?? "").trim(), pad = n => String(n).padStart(2, "0");
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
@@ -436,6 +466,7 @@ function authMessage(ex) {
 // ---------- top-level ----------
 function render(data = last) {
   dirty = false;
+  versionBanner();
   $("#topbar").classList.toggle("hidden", !me);
   if (!me) return renderAuth();
   $("#who").textContent = `${me.name} (${me.email})${me.section && !me.is_admin ? ` · ${me.section}` : ""}`;
@@ -685,6 +716,7 @@ async function renderAdmin(prefetched) {
 function drawMissing(week, shown) {
   const box = $("#missing");
   if (!week || !started(week)) { box.innerHTML = ""; return; }
+  if (!shown.length) { box.innerHTML = ""; return; }
   if (week.no_class) { box.innerHTML = `<span class="muted">${esc(weekName(week))} is a no-class week, so no hours are expected.</span>`; return; }
   const missing = shown.filter(s => !(s.hours[week.id] > 0) && !s.entries?.[week.id]?.excused);
   if (!missing.length) {

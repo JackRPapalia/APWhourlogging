@@ -1,7 +1,8 @@
 /**
  * APW Hours Log — backend for the GitHub Pages site.
  *
- * Paste this into the spreadsheet's Extensions → Apps Script editor, set FIREBASE_API_KEY,
+ * Paste this into the spreadsheet's Extensions → Apps Script editor, set FIREBASE_API_KEY
+ * and FIREBASE_PROJECT_ID,
  * then Deploy → Manage deployments → Edit → New version (or New deployment → Web app,
  * Execute as: Me, Who has access: Anyone). See README.md for the full steps.
  *
@@ -21,6 +22,16 @@
 
 // Your Firebase project's Web API key (Firebase console → Project settings → General → Web API key).
 const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
+// Your Firebase project ID (the projectId in config.js). Logins from any other project are refused.
+const FIREBASE_PROJECT_ID = 'apwhourlogging';
+
+// A checked login is remembered for this long at most, and never past the token's own expiry.
+const TOKEN_CACHE_SECONDS = 600;
+// A token Google rejected is refused without asking Google again for this long.
+const BAD_TOKEN = 'bad';
+const BAD_TOKEN_SECONDS = 600;
+// Real Firebase ID tokens are around 1 KB; anything far bigger is junk.
+const MAX_TOKEN_LENGTH = 4096;
 
 // Sent with every response so the site can tell admins when this script needs redeploying.
 // Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
@@ -75,7 +86,14 @@ function doPost(e) {
     if (WRITE_ACTIONS.indexOf(body.action) !== -1) lock_();
     result = route_(body, auth);
   } catch (err) {
-    result = { error: String((err && err.message) || err) };
+    if (err && err.forUser) {
+      result = { error: err.message };
+    } else {
+      // Unexpected errors can mention tab names or other internals: log them for the
+      // script owner (Apps Script → Executions) and send the browser a plain message.
+      console.error((err && err.stack) || err);
+      result = { error: 'Something went wrong. Please try again, and tell your teacher if it keeps happening.' };
+    }
   } finally {
     if (REQ.lock) REQ.lock.releaseLock();
   }
@@ -98,8 +116,13 @@ function changed_() {
 // case another request may have written in the meantime and the caller should re-check.
 function lock_() {
   if (REQ.lock) return false;
-  REQ.lock = LockService.getScriptLock();
-  REQ.lock.waitLock(20000);
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (e) {
+    fail_('The server is busy. Please try again in a moment.');
+  }
+  REQ.lock = lock;
   changed_();
   return true;
 }
@@ -167,27 +190,72 @@ function route_(body, auth) {
 
 // ---------- auth ----------
 
-// Checks a Firebase ID token with Google and returns { uid, email, name }.
+// Checks a Firebase ID token with Google and returns { uid, email, name, exp }.
 function verifyToken_(idToken) {
   if (FIREBASE_API_KEY.indexOf('PASTE') === 0) fail_('Set FIREBASE_API_KEY in the Apps Script first');
-  if (!idToken) fail_('Please log in');
+  if (!idToken || typeof idToken !== 'string') fail_('Please log in');
+  const expired = 'Your login expired. Please log in again.';
+
+  // Cheap checks first, so junk never costs a call to Google (each call uses up daily quota).
+  // These read the token without checking its signature; Google checks that below.
+  const claims = tokenClaims_(idToken);
+  const now = Math.floor(Date.now() / 1000);
+  if (!claims || claims.aud !== FIREBASE_PROJECT_ID ||
+      claims.iss !== 'https://securetoken.google.com/' + FIREBASE_PROJECT_ID || !(claims.exp > now)) {
+    fail_(expired);
+  }
+
   const cache = CacheService.getScriptCache();
   const key = 'tok:' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken));
   const hit = cache.get(key);
-  if (hit) return JSON.parse(hit);
+  if (hit === BAD_TOKEN) fail_(expired);
+  if (hit) return JSON.parse(hit); // never cached past the token's own expiry (see below)
+
   const res = UrlFetchApp.fetch(
     'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(FIREBASE_API_KEY),
     { method: 'post', contentType: 'application/json', payload: JSON.stringify({ idToken }), muteHttpExceptions: true }
   );
+  const code = res.getResponseCode();
+  if (code === 400) {
+    // Google rejected the token: remember that, so sending it again doesn't cost another call.
+    cache.put(key, BAD_TOKEN, BAD_TOKEN_SECONDS);
+    fail_(expired);
+  }
+  if (code !== 200) fail_('Could not check your login with Google. Please try again in a moment.');
   const data = JSON.parse(res.getContentText() || '{}');
   const user = data.users && data.users[0];
-  if (res.getResponseCode() !== 200 || !user || !user.email || user.disabled) fail_('Your login expired. Please log in again.');
+  if (!user || !user.email || user.disabled) fail_(expired);
+  const email = String(user.email).toLowerCase();
+
+  // Only accept a Google sign-in whose email Google has verified and that still matches the
+  // account's email. This stays safe even if another sign-in method is turned on later, or
+  // the account's email is changed to someone else's without verifying it.
+  const google = (user.providerUserInfo || []).find(p => p.providerId === 'google.com');
+  if (user.emailVerified !== true || !google || (google.email && String(google.email).toLowerCase() !== email)) {
+    fail_('Please sign in with your Google account.');
+  }
+
   // Take the name Google reports for the account, not the Firebase profile name: anyone
   // signed in can change that one through Firebase's public API.
-  const google = (user.providerUserInfo || []).find(p => p.providerId === 'google.com');
-  const auth = { uid: user.localId, email: String(user.email).toLowerCase(), name: (google && google.displayName) || '' };
-  cache.put(key, JSON.stringify(auth), 600);
+  const auth = { uid: user.localId, email, name: google.displayName || '', exp: claims.exp };
+  const ttl = Math.min(TOKEN_CACHE_SECONDS, claims.exp - now);
+  if (ttl >= 1) cache.put(key, JSON.stringify(auth), ttl);
   return auth;
+}
+
+// The claims inside a Firebase ID token (a JWT), without checking its signature, or null
+// if it isn't shaped like one.
+function tokenClaims_(token) {
+  const parts = token.split('.');
+  if (parts.length !== 3 || token.length > MAX_TOKEN_LENGTH) return null;
+  try {
+    let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (payload.length % 4) payload += '=';
+    const claims = JSON.parse(Utilities.newBlob(Utilities.base64Decode(payload)).getDataAsString());
+    return claims && typeof claims === 'object' ? claims : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // Lets the user in only if they're on a roster tab, records their name the first time,
@@ -273,7 +341,7 @@ function rosterEmails_(name) {
 function appendToRoster_(name, emails) {
   if (!emails.length) return;
   const sh = rosterSheet_(name);
-  sh.getRange(sh.getLastRow() + 1, 1, emails.length, 1).setValues(emails.map(e => [e]));
+  sh.getRange(sh.getLastRow() + 1, 1, emails.length, 1).setValues(emails.map(e => [safe_(e)])); // never a formula
   changed_();
 }
 
@@ -749,8 +817,12 @@ function deleteRows_(t, rows) {
 
 // ---------- misc ----------
 
+// Stops the request with a message meant for the person using the site. Any other error
+// is replaced by a generic message before it reaches the browser (see doPost).
 function fail_(message) {
-  throw new Error(message);
+  const err = new Error(message);
+  err.forUser = true;
+  throw err;
 }
 
 function json_(obj) {

@@ -38,7 +38,7 @@ You can type or edit hours rows directly in the sheet. A row counts toward which
 ### 2. Apps Script
 
 1. Open the spreadsheet and go to **Extensions → Apps Script**. Replace the code with [`apps_script.gs`](apps_script.gs).
-2. Set `FIREBASE_API_KEY` at the top to the same `apiKey` as in `config.js`, then save.
+2. Set `FIREBASE_API_KEY` and `FIREBASE_PROJECT_ID` at the top to the same `apiKey` and `projectId` as in `config.js`, then save.
 3. **Deploy → Manage deployments → pencil icon → Version: New version → Deploy.** If this is the first deployment, use **New deployment → Web app** instead, with **Execute as: Me** and **Who has access: Anyone**.
 4. Put the web app URL (it ends in `/exec`) in `SCRIPT_URL` in `config.js`.
 

@@ -106,7 +106,7 @@ function lock_() {
 
 function route_(body, auth) {
   // Loading the page ("me") counts as signing in; saves and other actions don't.
-  const me = registerUser_(auth, body.name, body.action === 'me');
+  const me = registerUser_(auth, body.action === 'me');
   const requireAdmin = () => { if (!me.is_admin) fail_('Admins only'); };
   switch (body.action) {
     case 'me': {
@@ -182,21 +182,25 @@ function verifyToken_(idToken) {
   const data = JSON.parse(res.getContentText() || '{}');
   const user = data.users && data.users[0];
   if (res.getResponseCode() !== 200 || !user || !user.email || user.disabled) fail_('Your login expired. Please log in again.');
-  const auth = { uid: user.localId, email: String(user.email).toLowerCase(), name: user.displayName || '' };
+  // Take the name Google reports for the account, not the Firebase profile name: anyone
+  // signed in can change that one through Firebase's public API.
+  const google = (user.providerUserInfo || []).find(p => p.providerId === 'google.com');
+  const auth = { uid: user.localId, email: String(user.email).toLowerCase(), name: (google && google.displayName) || '' };
   cache.put(key, JSON.stringify(auth), 600);
   return auth;
 }
 
 // Lets the user in only if they're on a roster tab, records their name the first time,
 // and (when `signingIn`) when they last signed in.
-function registerUser_(auth, name, signingIn) {
+function registerUser_(auth, signingIn) {
   // Admins are only ever added by hand in the sheet or by another admin: an empty Admins
   // tab never lets the next person to sign in become one.
   const access = access_(auth.email);
   if (!access.is_admin && !access.section) {
     fail_(`${auth.email} isn't on the class list yet. Ask your teacher to add you, then sign in again.`);
   }
-  const cleanName = String(name || auth.name || '').trim().slice(0, 80);
+  // Only the verified name from Google is used; the browser can't choose what's recorded.
+  const cleanName = String(auth.name || '').trim().slice(0, 80);
   const find = () => table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === auth.email);
   let row = find();
   if (!row || (!row.name && cleanName)) {

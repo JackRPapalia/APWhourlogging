@@ -528,7 +528,7 @@ onAuthStateChanged(auth, async user => {
     loading();
   }
   try {
-    const data = await api("me", { name: user.displayName || "", withOverview: true });
+    const data = await api("me", { withOverview: true });
     const changed = JSON.stringify(data) !== JSON.stringify(saved);
     last = data;
     remember({});
@@ -729,7 +729,12 @@ async function renderAdmin(prefetched) {
     $("#r-emails").focus({ preventScroll: true });
   };
   $("#export").onclick = () => {
-    const q = v => `"${String(v).replace(/"/g, '""')}"`;
+    // A leading = + - @ (or tab / return) would run as a formula in Excel or Sheets; a leading ' keeps it as text.
+    const q = v => {
+      let s = String(v);
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
     const rows = students.filter(s => !adminSection || s.section === adminSection);
     const stamp = ms => { const d = new Date(ms); return `${isoDay(d)} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
     const lines = [["Name", "Email", "Section", "Last sign-in", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];

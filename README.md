@@ -19,7 +19,7 @@ Weekly hours logging for an advanced programming class, hosted on GitHub Pages.
 | Tab | Columns | Notes |
 | --- | --- | --- |
 | first tab | `Username, Name, Week, Hours, Notes, Updated, Updated by, Excused` | One row per student per week. `Username` is the student's email, and `Week` is the week's start date. `Updated` and `Updated by` are filled in on every save. An excused week has `Excused` = `yes`, no hours, and the reason in `Notes`. Missing columns are added automatically. |
-| `Admins`, `Section 1`, `Section 2` | email addresses in column A | The class list. A header row, blank rows and `mailto:` links are fine. Edit it here or from the admin panel. If `Admins` is ever empty, the next person to sign in is added to it, so you can't lock yourself out. |
+| `Admins`, `Section 1`, `Section 2` | email addresses in column A | The class list. A header row, blank rows and `mailto:` links are fine. Edit it here or from the admin panel. Before the first sign-in, type your own email into `Admins` by hand. Nobody is ever made an admin automatically, and if `Admins` is emptied, add an email here again to get back in. |
 | `Users` | `Email, Name, Joined, Last login` | Created automatically. It records each person's name from Google the first time they sign in, and when they last opened the site. |
 | `Weeks` | `Id, Label, Start, End, Auto, No class` | Created automatically. Manage weeks from the admin panel. `No class` is `yes` for breaks. |
 | `Settings` | `Key, Value` | Created automatically. `grace_days` is how many days after a week ends students can still change it (`none` for no deadline). |

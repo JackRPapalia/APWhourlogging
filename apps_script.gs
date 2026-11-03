@@ -16,7 +16,7 @@
  *   - "Users":        Email, Name, Joined, Last login     (created automatically; names
  *                     come from people's Google accounts the first time they sign in)
  *   - "Weeks":        Id, Label, Start, End, Auto         (created automatically)
- * If the Admins tab is empty, the first person to sign in is added to it.
+ * Before anyone can sign in, type at least one admin's email into the Admins tab by hand.
  */
 
 // Your Firebase project's Web API key (Firebase console → Project settings → General → Web API key).
@@ -24,7 +24,7 @@ const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
 // Sent with every response so the site can tell admins when this script needs redeploying.
 // Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 1;
+const SCRIPT_VERSION = 2;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -190,13 +190,9 @@ function verifyToken_(idToken) {
 // Lets the user in only if they're on a roster tab, records their name the first time,
 // and (when `signingIn`) when they last signed in.
 function registerUser_(auth, name, signingIn) {
-  let access = access_(auth.email);
-  if (!access.is_admin && !access.section && rosterEmails_(ADMINS_SHEET).length === 0) {
-    lock_();
-    // Nobody is an admin yet, so the first person in becomes one.
-    if (rosterEmails_(ADMINS_SHEET).length === 0) appendToRoster_(ADMINS_SHEET, [auth.email]);
-    access = access_(auth.email);
-  }
+  // Admins are only ever added by hand in the sheet or by another admin: an empty Admins
+  // tab never lets the next person to sign in become one.
+  const access = access_(auth.email);
   if (!access.is_admin && !access.section) {
     fail_(`${auth.email} isn't on the class list yet. Ask your teacher to add you, then sign in again.`);
   }

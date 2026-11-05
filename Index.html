@@ -24,7 +24,8 @@
   header nav { display: flex; gap: 4px; margin-left: 8px; }
   header .spacer { flex: 1; }
   header .who { color: var(--muted); font-size: 14px; }
-  main { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  /* Wide enough to fill a full-width Google Sites embed; the cap only keeps lines readable on very large screens. */
+  main { max-width: 1400px; margin: 16px auto; padding: 0 16px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
   h2 { font-size: 16px; margin: 0 0 14px; }
   label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
@@ -32,7 +33,7 @@
   textarea { resize: vertical; min-height: 60px; }
   button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
   a.button { display: inline-block; font-size: 13px; padding: 4px 10px; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; border: 1px solid var(--accent); }
-  button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  button.ghost, a.button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   button.small { padding: 4px 10px; font-size: 13px; }
   button.danger { background: transparent; color: var(--danger); border-color: transparent; }
@@ -129,6 +130,8 @@
   <nav id="nav"></nav>
   <span class="spacer"></span>
   <span class="who" id="who"></span>
+  <!-- Opens the app in its own tab, outside the Google Sites embed. Hidden in that tab. -->
+  <a class="button ghost hidden" id="fullscreen" target="_blank" rel="noopener">Open full screen ↗</a>
 </header>
 
 <main id="app"><p class="loading">Loading…</p></main>
@@ -439,11 +442,25 @@ async function start() {
     me = data.user;
     view = me.is_admin ? "admin" : "student";
     render(data);
+    showFullScreenLink(data.app_url);
   } catch (ex) {
     fatal(ex.message);
   }
 }
 start();
+
+// The "Open full screen" link opens this app at its own address with ?full=1, and the copy
+// opened that way hides the link. google.script.url reads the real address of the app,
+// since this page itself runs inside Google's frame.
+function showFullScreenLink(appUrl) {
+  if (!appUrl) return;
+  google.script.url.getLocation(loc => {
+    if (loc?.parameter?.full) return;
+    const link = $("#fullscreen");
+    link.href = appUrl + (appUrl.includes("?") ? "&" : "?") + "full=1";
+    link.classList.remove("hidden");
+  });
+}
 
 // ---------- student ----------
 async function renderStudent(data) {

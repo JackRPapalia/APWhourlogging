@@ -129,7 +129,7 @@ function route_(body, auth) {
   switch (body.action) {
     case 'me': {
       const weeks = listWeeks_();
-      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks), settings: settings_(), site_url: siteUrl_() };
+      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks), settings: settings_(), site_url: siteUrl_(), app_url: appUrl_() };
       // Admins land on the admin panel, so send its data now and save a second (slow) round trip.
       if (me.is_admin && body.withOverview) result.overview = overview_();
       return result;
@@ -220,7 +220,11 @@ function directoryName_(email) {
 
 // Where reminder emails send students: the Google Site if set, else this web app.
 function siteUrl_() {
-  if (SITE_URL) return SITE_URL;
+  return SITE_URL || appUrl_();
+}
+
+// This web app's own address (ends in /exec), for the page's "Open full screen" link.
+function appUrl_() {
   try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
 }
 

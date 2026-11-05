@@ -1,13 +1,13 @@
 /**
- * APW Hours Log — backend for the GitHub Pages site.
+ * APW Hours Log — an Apps Script web app, embedded in a Google Site.
  *
- * Paste this into the spreadsheet's Extensions → Apps Script editor, set FIREBASE_API_KEY
- * and FIREBASE_PROJECT_ID,
- * then Deploy → Manage deployments → Edit → New version (or New deployment → Web app,
- * Execute as: Me, Who has access: Anyone). See README.md for the full steps.
+ * This file is Code.gs in the spreadsheet's Extensions → Apps Script project; the page is
+ * the HTML file Index.html in the same project. Deploy → New deployment → Web app with
+ * Execute as: Me and Who has access: Anyone within trevor.org, then embed the web app URL
+ * in the Google Site. See README.md for the full steps.
  *
- * Every request must carry a Firebase ID token, which is checked with Google before
- * anything is read or written. Only people listed on a roster tab can sign in:
+ * Google tells the script who is using the page (their signed-in school account), so there
+ * is no separate login. Only people listed on a roster tab get in:
  *   - "Admins", "Section 1", "Section 2":  one email per row in column A (any header row,
  *                     blank rows and "mailto:" links are fine). Admins manage the class;
  *                     a student's section is the tab they're on.
@@ -20,22 +20,17 @@
  * Before anyone can sign in, type at least one admin's email into the Admins tab by hand.
  */
 
-// Your Firebase project's Web API key (Firebase console → Project settings → General → Web API key).
-const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
-// Your Firebase project ID (the projectId in config.js). Logins from any other project are refused.
-const FIREBASE_PROJECT_ID = 'apwhourlogging';
+// The school's Google Workspace domain. Only used in messages; the deployment setting
+// "Who has access: Anyone within trevor.org" is what keeps other accounts out.
+const SCHOOL_DOMAIN = 'trevor.org';
 
-// A checked login is remembered for this long at most, and never past the token's own expiry.
-const TOKEN_CACHE_SECONDS = 600;
-// A token Google rejected is refused without asking Google again for this long.
-const BAD_TOKEN = 'bad';
-const BAD_TOKEN_SECONDS = 600;
-// Real Firebase ID tokens are around 1 KB; anything far bigger is junk.
-const MAX_TOKEN_LENGTH = 4096;
+// The Google Sites page the app is embedded in, for the link in "log your hours" reminder
+// emails. Leave blank to link to the web app's own URL instead.
+const SITE_URL = '';
 
-// Sent with every response so the site can tell admins when this script needs redeploying.
-// Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 2;
+// Names come from the school directory when the optional Admin SDK service is turned on
+// (see README); a looked-up name is remembered this long.
+const NAME_CACHE_SECONDS = 6 * 60 * 60;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -57,16 +52,12 @@ const DEFAULT_GRACE_DAYS = 2;
 const LOGIN_EVERY_MS = 5 * 60 * 1000;
 const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto', 'No class'];
 
+// Serves the page. ALLOWALL lets a Google Site (or any page) show it in an embed.
 function doGet() {
-  return json_({ ok: true, app: 'APW Hours Log' });
-}
-
-// Run this once from the Apps Script editor (select "authorize", click Run) to grant the
-// permissions the web app needs: editing this spreadsheet and contacting Firebase.
-function authorize() {
-  SpreadsheetApp.getActiveSpreadsheet().getName();
-  UrlFetchApp.fetch('https://identitytoolkit.googleapis.com/', { muteHttpExceptions: true });
-  Logger.log('Authorized. The web app can now check Firebase logins.');
+  return HtmlService.createHtmlOutputFromFile('Index')
+    .setTitle('APW Hours Log')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
 // Actions that change the sheet. They take the script lock up front; everything else
@@ -77,12 +68,16 @@ const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'excuseEntry', 'saveWeek', 'a
 // call is slow), and the lock is only held when this request needs to write.
 let REQ = { memo: {}, lock: null };
 
-function doPost(e) {
+// The page's only way in: it calls api({ action, ... }) through google.script.run.
+// Any other top-level function without a trailing "_" could be called from the page too,
+// so every helper's name ends in "_". Returns a JSON string, which avoids google.script.run's
+// limits on what objects it can pass back.
+function api(body) {
   let result;
   REQ = { memo: {}, lock: null };
   try {
-    const body = JSON.parse((e.postData && e.postData.contents) || '{}');
-    const auth = verifyToken_(body.idToken);
+    body = body && typeof body === 'object' ? body : {};
+    const auth = currentUser_();
     if (WRITE_ACTIONS.indexOf(body.action) !== -1) lock_();
     result = route_(body, auth);
   } catch (err) {
@@ -97,7 +92,7 @@ function doPost(e) {
   } finally {
     if (REQ.lock) REQ.lock.releaseLock();
   }
-  return json_(result);
+  return JSON.stringify(result);
 }
 
 function memo_(key, fn) {
@@ -134,7 +129,7 @@ function route_(body, auth) {
   switch (body.action) {
     case 'me': {
       const weeks = listWeeks_();
-      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks), settings: settings_() };
+      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks), settings: settings_(), site_url: siteUrl_() };
       // Admins land on the admin panel, so send its data now and save a second (slow) round trip.
       if (me.is_admin && body.withOverview) result.overview = overview_();
       return result;
@@ -190,72 +185,43 @@ function route_(body, auth) {
 
 // ---------- auth ----------
 
-// Checks a Firebase ID token with Google and returns { uid, email, name, exp }.
-function verifyToken_(idToken) {
-  if (FIREBASE_API_KEY.indexOf('PASTE') === 0) fail_('Set FIREBASE_API_KEY in the Apps Script first');
-  if (!idToken || typeof idToken !== 'string') fail_('Please log in');
-  const expired = 'Your login expired. Please log in again.';
-
-  // Cheap checks first, so junk never costs a call to Google (each call uses up daily quota).
-  // These read the token without checking its signature; Google checks that below.
-  const claims = tokenClaims_(idToken);
-  const now = Math.floor(Date.now() / 1000);
-  if (!claims || claims.aud !== FIREBASE_PROJECT_ID ||
-      claims.iss !== 'https://securetoken.google.com/' + FIREBASE_PROJECT_ID || !(claims.exp > now)) {
-    fail_(expired);
+// { email } of the person using the page, from the Google account they're signed in with.
+// Google fills this in itself, so the page can't claim to be someone else. It's only
+// available to people in the same Google Workspace domain as the script's owner, which is
+// why the script must be owned by a @trevor.org account and deployed to "Anyone within
+// trevor.org".
+function currentUser_() {
+  const email = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
+  if (!email) {
+    fail_(`Google didn't say who you are. Open this page while signed in to your @${SCHOOL_DOMAIN} Google account.`);
   }
-
-  const cache = CacheService.getScriptCache();
-  const key = 'tok:' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken));
-  const hit = cache.get(key);
-  if (hit === BAD_TOKEN) fail_(expired);
-  if (hit) return JSON.parse(hit); // never cached past the token's own expiry (see below)
-
-  const res = UrlFetchApp.fetch(
-    'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(FIREBASE_API_KEY),
-    { method: 'post', contentType: 'application/json', payload: JSON.stringify({ idToken }), muteHttpExceptions: true }
-  );
-  const code = res.getResponseCode();
-  if (code === 400) {
-    // Google rejected the token: remember that, so sending it again doesn't cost another call.
-    cache.put(key, BAD_TOKEN, BAD_TOKEN_SECONDS);
-    fail_(expired);
-  }
-  if (code !== 200) fail_('Could not check your login with Google. Please try again in a moment.');
-  const data = JSON.parse(res.getContentText() || '{}');
-  const user = data.users && data.users[0];
-  if (!user || !user.email || user.disabled) fail_(expired);
-  const email = String(user.email).toLowerCase();
-
-  // Only accept a Google sign-in whose email Google has verified and that still matches the
-  // account's email. This stays safe even if another sign-in method is turned on later, or
-  // the account's email is changed to someone else's without verifying it.
-  const google = (user.providerUserInfo || []).find(p => p.providerId === 'google.com');
-  if (user.emailVerified !== true || !google || (google.email && String(google.email).toLowerCase() !== email)) {
-    fail_('Please sign in with your Google account.');
-  }
-
-  // Take the name Google reports for the account, not the Firebase profile name: anyone
-  // signed in can change that one through Firebase's public API.
-  const auth = { uid: user.localId, email, name: google.displayName || '', exp: claims.exp };
-  const ttl = Math.min(TOKEN_CACHE_SECONDS, claims.exp - now);
-  if (ttl >= 1) cache.put(key, JSON.stringify(auth), ttl);
-  return auth;
+  return { email };
 }
 
-// The claims inside a Firebase ID token (a JWT), without checking its signature, or null
-// if it isn't shaped like one.
-function tokenClaims_(token) {
-  const parts = token.split('.');
-  if (parts.length !== 3 || token.length > MAX_TOKEN_LENGTH) return null;
+// The person's name from the school directory, or '' if the optional Admin SDK service isn't
+// turned on or the directory doesn't share it.
+function directoryName_(email) {
+  if (typeof AdminDirectory === 'undefined') return '';
+  const cache = CacheService.getScriptCache();
+  const key = 'name:' + email;
+  const hit = cache.get(key);
+  if (hit !== null) return JSON.parse(hit); // stored as JSON so a blank name is remembered too
+  let name = '';
   try {
-    let payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    while (payload.length % 4) payload += '=';
-    const claims = JSON.parse(Utilities.newBlob(Utilities.base64Decode(payload)).getDataAsString());
-    return claims && typeof claims === 'object' ? claims : null;
+    // "domain_public" lets a non-admin script owner read the fields the domain shares.
+    const user = AdminDirectory.Users.get(email, { viewType: 'domain_public', fields: 'name/fullName' });
+    name = String((user && user.name && user.name.fullName) || '');
   } catch (e) {
-    return null;
+    console.warn('Directory lookup failed for ' + email + ': ' + e);
   }
+  cache.put(key, JSON.stringify(name), NAME_CACHE_SECONDS);
+  return name;
+}
+
+// Where reminder emails send students: the Google Site if set, else this web app.
+function siteUrl_() {
+  if (SITE_URL) return SITE_URL;
+  try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
 }
 
 // Lets the user in only if they're on a roster tab, records their name the first time,
@@ -267,10 +233,11 @@ function registerUser_(auth, signingIn) {
   if (!access.is_admin && !access.section) {
     fail_(`${auth.email} isn't on the class list yet. Ask your teacher to add you, then sign in again.`);
   }
-  // Only the verified name from Google is used; the browser can't choose what's recorded.
-  const cleanName = String(auth.name || '').trim().slice(0, 80);
   const find = () => table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === auth.email);
   let row = find();
+  // Names come from the school directory, never from the page, and are only looked up for
+  // someone new or whose name cell is blank. Admins can also type names into the Users tab.
+  const cleanName = !row || !row.name ? directoryName_(auth.email).trim().slice(0, 80) : '';
   if (!row || (!row.name && cleanName)) {
     if (lock_()) row = find();
     const t = table_(USERS_SHEET, USERS_HEADERS);
@@ -823,11 +790,6 @@ function fail_(message) {
   const err = new Error(message);
   err.forUser = true;
   throw err;
-}
-
-function json_(obj) {
-  const body = Object.assign({ version: SCRIPT_VERSION }, obj);
-  return ContentService.createTextOutput(JSON.stringify(body)).setMimeType(ContentService.MimeType.JSON);
 }
 
 function tz_() {

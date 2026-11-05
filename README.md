@@ -1,10 +1,10 @@
 # APW Hours Log
 
-Weekly hours logging for an advanced programming class, hosted on GitHub Pages.
+Weekly hours logging for an advanced programming class, embedded in a Google Site. It runs entirely inside the school's Google Workspace: no separate server or hosting.
 
-- **Login** uses Firebase Authentication with Google sign-in only. The account picker suggests @trevor.org accounts first, and there's a link for people on other domains. There are no passwords to manage.
-- **Data** lives in a Google Sheet. A Google Apps Script ([`apps_script.gs`](apps_script.gs)) is the backend. It checks every request's Firebase login with Google before it reads or writes anything.
-- **Only people on the class list can sign in.** The list lives in the sheet's `Admins`, `Section 1` and `Section 2` tabs. Admins can add and remove people from the admin panel.
+- **The app is an Apps Script web app** attached to the class spreadsheet. [`Code.gs`](Code.gs) reads and writes the sheet, and [`Index.html`](Index.html) is the page. The Google Site shows the page in an embed.
+- **There's no separate login.** Google tells the script which @trevor.org account is signed in, so students just open the Google Site page.
+- **Only people on the class list get in.** The list lives in the sheet's `Admins`, `Section 1` and `Section 2` tabs. Admins can add and remove people from the admin panel.
 
 ## How it works
 
@@ -20,7 +20,7 @@ Weekly hours logging for an advanced programming class, hosted on GitHub Pages.
 | --- | --- | --- |
 | first tab | `Username, Name, Week, Hours, Notes, Updated, Updated by, Excused` | One row per student per week. `Username` is the student's email, and `Week` is the week's start date. `Updated` and `Updated by` are filled in on every save. An excused week has `Excused` = `yes`, no hours, and the reason in `Notes`. Missing columns are added automatically. |
 | `Admins`, `Section 1`, `Section 2` | email addresses in column A | The class list. A header row, blank rows and `mailto:` links are fine. Edit it here or from the admin panel. Before the first sign-in, type your own email into `Admins` by hand. Nobody is ever made an admin automatically, and if `Admins` is emptied, add an email here again to get back in. |
-| `Users` | `Email, Name, Joined, Last login` | Created automatically. It records each person's name from Google the first time they sign in, and when they last opened the site. |
+| `Users` | `Email, Name, Joined, Last login` | Created automatically. It records each person's name the first time they open the app, and when they last opened it. Names come from the school directory if the Admin SDK service is on (see Setup); otherwise the part of the email before the `@` is used. You can type a better name into the `Name` column at any time. |
 | `Weeks` | `Id, Label, Start, End, Auto, No class` | Created automatically. Manage weeks from the admin panel. `No class` is `yes` for breaks. |
 | `Settings` | `Key, Value` | Created automatically. `grace_days` is how many days after a week ends students can still change it (`none` for no deadline). |
 
@@ -28,33 +28,44 @@ You can type or edit hours rows directly in the sheet. A row counts toward which
 
 ## Setup
 
-### 1. Firebase
+The spreadsheet and its Apps Script must be **owned by a @trevor.org account**. Google only tells the script who's using it when the user and the script's owner are in the same Workspace domain.
 
-1. In the [Firebase console](https://console.firebase.google.com/), create a project, or use an existing one.
-2. **Build → Authentication → Get started.** Under **Sign-in method**, enable **Google**. Leave **Email/Password** off.
-3. **Authentication → Settings → Authorized domains:** add `jackrpapalia.github.io`. `localhost` is already there.
-4. **Project settings (gear icon) → General → Your apps:** add a **Web app** (`</>`). Copy the `firebaseConfig` values into [`config.js`](config.js).
+### 1. Put the code in the spreadsheet's Apps Script project
 
-### 2. Apps Script
+1. Open the spreadsheet and go to **Extensions → Apps Script**.
+2. Open `Code.gs` (rename the default file to that if needed). Replace everything in it with [`Code.gs`](Code.gs), then save.
+3. Click **+** next to **Files**, choose **HTML**, and name it `Index` (Apps Script adds the `.html`). Replace everything in it with [`Index.html`](Index.html), then save.
+4. If the project still has an old `apps_script.gs` file from the Firebase version, delete it.
+5. Optional: to set the Google Site link used in reminder emails, put the Site page's address in `SITE_URL` at the top of `Code.gs`. If you leave it blank, emails link to the web app itself.
 
-1. Open the spreadsheet and go to **Extensions → Apps Script**. Replace the code with [`apps_script.gs`](apps_script.gs).
-2. Set `FIREBASE_API_KEY` and `FIREBASE_PROJECT_ID` at the top to the same `apiKey` and `projectId` as in `config.js`, then save.
-3. **Deploy → Manage deployments → pencil icon → Version: New version → Deploy.** If this is the first deployment, use **New deployment → Web app** instead, with **Execute as: Me** and **Who has access: Anyone**.
-4. Put the web app URL (it ends in `/exec`) in `SCRIPT_URL` in `config.js`.
+### 2. Optional: real names from the school directory
 
-### 3. GitHub Pages
+1. In the Apps Script editor, click **+** next to **Services**.
+2. Choose **Admin SDK API**, keep the identifier `AdminDirectory`, then **Add**.
 
-In the GitHub repo, go to **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then **main** and **/ (root)**. The site is published at `https://jackrpapalia.github.io/APWhourlogging/`.
+Without it, everything still works; new people are listed by their email name until you type a name into the `Users` tab. If your domain doesn't share directory names, IT may need to turn on **Directory → Sharing settings → Contact sharing** in the Admin console.
 
-## Run it locally
+### 3. Deploy it as a web app
 
-```
-python3 -m http.server 8000
-```
+1. **Deploy → New deployment**, click the gear icon, choose **Web app**.
+2. **Execute as: Me.** The script reads and writes the sheet as you, so students don't need access to the spreadsheet.
+3. **Who has access: Anyone within trevor.org.** This keeps every other Google account out.
+4. Click **Deploy**, approve the permissions it asks for, and copy the **Web app URL** (it ends in `/exec`).
+5. Open that URL once yourself to check it loads. Your email must already be in the `Admins` tab.
 
-Then open http://localhost:8000. Opening `index.html` straight from Finder won't work, because browsers block modules on `file://` pages.
+After changing the code later: **Deploy → Manage deployments → pencil icon → Version: New version → Deploy.** The URL stays the same, so the Google Site doesn't need updating.
+
+### 4. Add it to the Google Site
+
+1. Open the Google Site in edit mode and go to the page where the hours log should live.
+2. **Insert → Embed → By URL**, paste the web app URL, and choose **Whole page** if asked.
+3. Drag the embed's handles to make it tall enough (the admin panel is long; full width and most of the page height works well).
+4. **Publish** the Site, sharing it with people at trevor.org.
 
 ## Security notes
 
-- `config.js` is public on purpose: Firebase web config isn't a secret, and neither is the script URL. What protects the data is the Apps Script, which checks each request's Firebase ID token with Google and allows admin actions only for users whose role is `admin`.
-- Only emails on the class list can sign in. Anyone else gets a message telling them to ask their teacher.
+- Google decides who is signed in; the page can't claim to be someone else. Anyone outside trevor.org is blocked by the deployment's access setting, and anyone inside trevor.org who isn't on the class list gets a message telling them to ask their teacher.
+- The page can only call two functions in `Code.gs`: `doGet` (which serves the page) and `api`. Every other function's name ends in `_`, which Apps Script keeps private. Keep it that way when adding code.
+- Admin actions are checked in `Code.gs`, not just hidden in the page. Nobody is ever made an admin automatically.
+- Text that would start a formula (`=`, `+`, `-`, `@`) is stored as plain text in the sheet and neutralized in CSV exports.
+- Nothing is kept in the browser between visits, so a shared computer doesn't show the previous person's data.

@@ -20,8 +20,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
   header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; background: var(--card); border-bottom: 1px solid var(--border); }
-  header h1 { font-size: 17px; margin: 0; }
-  header nav { display: flex; gap: 4px; margin-left: 8px; }
+  header nav { display: flex; gap: 4px; }
   header .spacer { flex: 1; }
   header .who { color: var(--muted); font-size: 14px; }
   /* Wide enough to fill a full-width Google Sites embed; the cap only keeps lines readable on very large screens. */
@@ -126,7 +125,6 @@
 <body>
 
 <header id="topbar" class="hidden">
-  <h1>APW Hours Log</h1>
   <nav id="nav"></nav>
   <span class="spacer"></span>
   <span class="who" id="who"></span>

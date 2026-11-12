@@ -170,6 +170,7 @@
         <option value="login">Last sign-in</option>
       </select>
       <button class="ghost small" id="export">Export CSV</button>
+      <button class="ghost small" id="refresh">Refresh</button>
       <button class="small" id="add-people">Add people</button>
     </div>
     <div class="stat-row" id="class-stats"></div>
@@ -250,11 +251,9 @@ let view = "student";
 // Nothing is saved in the browser: the page only knows who you are once the script says,
 // so saved data could show one person's hours to the next person on a shared computer.
 let last = null;   // latest "me" response: { user, weeks, entries, settings, site_url, overview? }
-let dirty = false; // someone typed since the last render
 function remember(patch) {
   if (last) Object.assign(last, patch);
 }
-app.addEventListener("input", () => { dirty = true; });
 // Browsers change a focused number box when you scroll over it, which makes the page hard
 // to scroll. Unfocus the box instead, so the wheel scrolls the page and the value stays put.
 document.addEventListener("wheel", e => {
@@ -273,8 +272,9 @@ function api(action, data = {}) {
         clearTimeout(timer);
         let out;
         try { out = JSON.parse(text); } catch { return reject(new Error(unreachable)); }
-        if (out.error) reject(new Error(out.error));
-        else resolve(fixWeeks(out));
+        if (out.error) return reject(new Error(out.error));
+        if (out.overview) out.overview.loaded_at = Date.now(); // so the admin panel knows how old it is
+        resolve(fixWeeks(out));
       })
       .withFailureHandler(() => { clearTimeout(timer); reject(new Error(unreachable)); })
       .api({ ...data, action });
@@ -416,7 +416,6 @@ async function busy(button, label, fn) {
 
 // ---------- top-level ----------
 function render(data = last) {
-  dirty = false;
   $("#topbar").classList.toggle("hidden", !me);
   if (!me) return;
   $("#who").textContent = `${me.name} (${me.email})${me.section && !me.is_admin ? ` · ${me.section}` : ""}`;
@@ -426,7 +425,9 @@ function render(data = last) {
        <button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>`
     : "";
   nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
-  const page = view === "admin" && me.is_admin ? renderAdmin(data?.overview) : renderStudent(data);
+  // The admin panel reuses the overview it already has, unless that's more than 2 minutes old.
+  const overview = data?.overview && Date.now() - (data.overview.loaded_at || 0) < 120000 ? data.overview : undefined;
+  const page = view === "admin" && me.is_admin ? renderAdmin(overview) : renderStudent(data);
   page.catch(ex => fatal(ex.message));
 }
 
@@ -469,26 +470,29 @@ async function renderStudent(data) {
   const { weeks } = data;
   let { entries } = data;
   const open = weeks.filter(started).reverse();
-
   const cur = weeks.find(isCurrent);
-  const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
-  $("#my-stats").innerHTML =
-    stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${esc(weekName(cur))})` : "No week in progress") +
-    stat(hrs(total), "Total hours") +
-    // No-class weeks and weeks you're excused from don't count toward "weeks logged".
-    stat(`${open.filter(w => entries[w.id]?.hours > 0).length}/${open.filter(w => !w.no_class && !entries[w.id]?.excused).length}`, "Weeks logged");
 
-  drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, {
-    selected: cur?.id,
-    tooltip: (w, v) => w.no_class && !v ? `${weekName(w)}: no class` : entries[w.id]?.excused ? `${weekName(w)}: excused` : `${weekName(w)}: ${hrs(v)} h`,
-  });
+  // The numbers and chart at the top. Redrawn on their own after a save.
+  const drawSummary = () => {
+    const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
+    $("#my-stats").innerHTML =
+      stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${esc(weekName(cur))})` : "No week in progress") +
+      stat(hrs(total), "Total hours") +
+      // No-class weeks and weeks you're excused from don't count toward "weeks logged".
+      stat(`${open.filter(w => entries[w.id]?.hours > 0).length}/${open.filter(w => !w.no_class && !entries[w.id]?.excused).length}`, "Weeks logged");
+    drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, {
+      selected: cur?.id,
+      tooltip: (w, v) => w.no_class && !v ? `${weekName(w)}: no class` : entries[w.id]?.excused ? `${weekName(w)}: excused` : `${weekName(w)}: ${hrs(v)} h`,
+    });
+  };
+  drawSummary();
 
   const list = $("#my-weeks");
   if (!open.length) {
     list.innerHTML = `<p class="muted">${weeks.length ? `The first week starts ${range(weeks[0])}.` : "Your teacher hasn't set up any weeks yet."}</p>`;
     return;
   }
-  list.innerHTML = open.map(w => {
+  const weekCard = w => {
     const e = entries[w.id];
     const head = `
       <div class="week-head">
@@ -497,10 +501,10 @@ async function renderStudent(data) {
       </div>`;
     const excuseNote = e?.excused ? `<p class="excused" style="margin:0 0 10px;font-size:14px">Your teacher excused you from this week${e.description ? ` (${esc(e.description)})` : ""}.${closedForMe(w) ? "" : " If you did some work anyway, you can still log it."}</p>` : "";
     if (w.no_class && !e) {
-      return `<div class="week">${head}<p class="muted" style="margin:0;font-size:14px">No class this week, so there's nothing to log.</p></div>`;
+      return `<div class="week" data-week="${w.id}">${head}<p class="muted" style="margin:0;font-size:14px">No class this week, so there's nothing to log.</p></div>`;
     }
     if (closedForMe(w) || (w.no_class && !me?.is_admin)) {
-      return `<div class="week">${head}
+      return `<div class="week" data-week="${w.id}">${head}
         ${e?.excused ? excuseNote
           : e ? `<div class="closed-entry"><strong>${hrs(e.hours)} h</strong><div class="desc">${esc(e.description)}</div></div>`
           : `<p class="muted" style="margin:0;font-size:14px">Not logged. This week closed on ${dueText(w)}; ask your teacher if you need to add hours.</p>`}
@@ -519,11 +523,27 @@ async function renderStudent(data) {
         </div>
       </div>
     </form>`;
-  }).join("");
+  };
+  list.innerHTML = open.map(weekCard).join("");
 
-  const reload = async result => {
-    remember({ entries: result.entries });
-    await renderStudent({ ...data, weeks, entries: result.entries });
+  list.oninput = ev => {
+    const status = ev.target.closest("form.week")?.querySelector(".status");
+    if (status) { status.className = "status muted"; status.textContent = "Not saved yet"; }
+  };
+  // After a save, only that week's card and the numbers at the top are redrawn. The rest
+  // of the page stays put, so the scroll position and text typed into other weeks are kept.
+  const applied = (result, form, message) => {
+    entries = result.entries;
+    // For admins the response carries a fresh overview, so the admin panel shows the change too.
+    remember(result.overview ? { entries, overview: result.overview } : { entries });
+    drawSummary();
+    const box = document.createElement("div");
+    box.innerHTML = weekCard(weeks.find(w => String(w.id) === form.dataset.week));
+    const card = box.firstElementChild;
+    form.replaceWith(card);
+    const status = $(".status", card);
+    if (status && message) status.textContent = message;
+    card.querySelector("button[type=submit]")?.focus({ preventScroll: true });
   };
   list.onsubmit = async ev => {
     ev.preventDefault();
@@ -533,7 +553,7 @@ async function renderStudent(data) {
       if (hours instanceof Error) throw hours;
       const result = await busy(form.querySelector("button[type=submit]"), "Saving…", () =>
         api("saveEntry", { week_id: Number(form.dataset.week), hours, description: form.description.value }));
-      await reload(result);
+      applied(result, form);
     } catch (ex) { status.className = "status error"; status.style.margin = 0; status.textContent = ex.message; }
   };
   list.onclick = async ev => {
@@ -541,7 +561,7 @@ async function renderStudent(data) {
     const form = ev.target.closest("form");
     if (!confirm("Clear your hours for this week?")) return;
     try {
-      await reload(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })));
+      applied(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })), form, "Cleared");
     } catch (ex) { $(".status", form).textContent = ex.message; }
   };
 }
@@ -551,10 +571,12 @@ let adminWeek = null;
 let adminSort = "name";
 let adminSection = "";
 
-// `prefetched` is the overview that came with the sign-in response, when there is one.
+// `prefetched` is an overview that came with another response (sign-in, or a change the
+// admin just made); without one, the latest is fetched.
 async function renderAdmin(prefetched) {
   if (!prefetched) loading();
   const overview = prefetched || await api("overview");
+  overview.loaded_at = overview.loaded_at || Date.now();
   remember({ overview, weeks: overview.weeks });
   const { weeks, students: people } = overview;
   const sections = overview.sections || ["Section 1", "Section 2"];
@@ -624,6 +646,7 @@ async function renderAdmin(prefetched) {
   $("#sort").onchange = e => { adminSort = e.target.value; draw(); };
   $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(tr.dataset.user).catch(ex => alert(ex.message)); };
   $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
+  $("#refresh").onclick = () => renderAdmin().catch(ex => fatal(ex.message));
   $("#add-people").onclick = () => {
     $("#class-list").scrollIntoView({ behavior: "smooth", block: "start" });
     $("#r-emails").focus({ preventScroll: true });
@@ -900,7 +923,11 @@ async function showStudent(email) {
   // Admin corrections: edit or clear any week for this student, even after it closes.
   $("#detail-weeks").onclick = async ev => {
     const excuseId = Number(ev.target.dataset.excuse), unexcuseId = Number(ev.target.dataset.unexcuse);
-    const refresh = async r => { await renderAdmin(r.overview); await showStudent(email); };
+    const refresh = async r => {
+      if (email === me.email) remember({ entries: r.entries }); // keep "My hours" in step
+      await renderAdmin(r.overview);
+      await showStudent(email);
+    };
     if (excuseId) {
       const reason = prompt(`Excuse ${user.name} from ${weekName(weeks.find(w => w.id === excuseId))}? Reason (optional):`, "");
       if (reason === null) return;
@@ -928,21 +955,20 @@ async function showStudent(email) {
           <span class="error" style="grid-column:1/-1;margin:0;min-height:0"></span>
         </form>`;
       const form = $("form", slot), err = $(".error", form);
-      const done = async r => { await renderAdmin(r.overview); await showStudent(email); };
       form.h.focus();
       form.onsubmit = async se => {
         se.preventDefault();
         try {
           const hours = readHM(form);
           if (hours instanceof Error) throw hours;
-          await done(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours, description: form.description.value })));
+          await refresh(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours, description: form.description.value })));
         }
         catch (ex) { err.textContent = ex.message; }
       };
       form.onclick = async ce => {
         if (ce.target.matches("[data-cancel]")) slot.innerHTML = "";
         if (ce.target.matches("[data-clear-entry]") && confirm(`Clear ${user.name}'s hours for this week?`)) {
-          try { await done(await busy(ce.target, "Clearing…", () => api("deleteEntry", { email, week_id: editId }))); }
+          try { await refresh(await busy(ce.target, "Clearing…", () => api("deleteEntry", { email, week_id: editId }))); }
           catch (ex) { err.textContent = ex.message; }
         }
       };

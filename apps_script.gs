@@ -24,7 +24,7 @@ const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
 // Sent with every response so the site can tell admins when this script needs redeploying.
 // Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 3;
+const SCRIPT_VERSION = 4;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -145,6 +145,8 @@ function route_(body, auth) {
       requireAdmin();
       saveSettings_(body);
       return { settings: settings_(), weeks: listWeeks_(), overview: overview_() };
+    case 'classmates':
+      return classmates_(me);
     case 'overview':
       requireAdmin();
       return overview_();
@@ -698,6 +700,29 @@ function overview_() {
     });
   });
   return { weeks, students, sections: SECTIONS, settings: settings_() };
+}
+
+// What every student in a section logged, for the Classmates page. Anyone on the class list
+// can see it, so it carries only names, hours and what they worked on: no emails, sign-in
+// times, excuse reasons or late reasons.
+function classmates_(me) {
+  const weeks = listWeeks_();
+  const hours = hoursByUser_(weeks);
+  const names = {};
+  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || '').trim(); });
+  const seen = {};
+  const students = [];
+  SECTIONS.forEach(section => rosterEmails_(section).forEach(email => {
+    if (seen[email]) return;
+    seen[email] = true;
+    const entries = {};
+    Object.keys(hours[email] || {}).forEach(id => {
+      const e = hours[email][id];
+      if (!e.excused) entries[id] = { hours: e.hours, description: e.description };
+    });
+    students.push({ name: names[email] || email.split('@')[0], section, you: email === me.email, entries });
+  }));
+  return { weeks, sections: SECTIONS, students };
 }
 
 function userEntries_(email) {

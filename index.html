@@ -114,6 +114,9 @@
   th .sub.noclass, .noclass-cell { color: var(--muted); font-style: italic; }
   .excused { color: var(--muted); font-style: italic; }
   .late-reason { grid-column: 1 / -1; }
+  .mate { border-top: 1px solid var(--border); padding: 12px 0; }
+  .mate-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .mate.you { background: var(--accent-soft); margin: 0 -12px; padding: 12px; border-radius: 8px; border-top-color: transparent; }
   .late-reason label { color: var(--danger); }
   tr.group td { background: var(--bg, transparent); border-bottom: 2px solid var(--border); padding-top: 18px; font-weight: 600; }
   tr.group:first-child td { padding-top: 8px; }
@@ -174,6 +177,26 @@
     <h2>My weekly hours</h2>
     <p class="muted" style="font-size:13px;margin:-6px 0 14px">Enter your total hours for each week and what you worked on. You can change a week until its due date.</p>
     <div id="my-weeks"></div>
+  </div>
+</template>
+
+<template id="tpl-classmates">
+  <div class="card">
+    <h2>What classmates logged</h2>
+    <div class="toolbar">
+      <label for="cm-week">Week</label>
+      <select id="cm-week"></select>
+      <label for="cm-section">Section</label>
+      <select id="cm-section"></select>
+      <span class="grow"></span>
+      <label for="cm-sort">Sort</label>
+      <select id="cm-sort">
+        <option value="name">Name</option>
+        <option value="hours">Most hours</option>
+      </select>
+    </div>
+    <div class="stat-row" id="cm-stats"></div>
+    <div id="cm-list"></div>
   </div>
 </template>
 
@@ -271,7 +294,7 @@ import { firebaseConfig, SCRIPT_URL } from "./config.js";
 const $ = (sel, root = document) => root.querySelector(sel);
 const SCHOOL_DOMAIN = "trevor.org";
 // The Apps Script version this page was built for (SCRIPT_VERSION in apps_script.gs).
-const EXPECTED_SCRIPT_VERSION = 3;
+const EXPECTED_SCRIPT_VERSION = 4;
 const SCRIPT_FILE_URL = "https://github.com/JackRPapalia/APWhourlogging/blob/main/apps_script.gs";
 let scriptVersion = null; // from the latest response; 0 means a script from before versions existed
 const app = $("#app");
@@ -509,12 +532,12 @@ function render(data = last) {
   if (!me) return renderAuth();
   $("#who").textContent = `${me.name} (${me.email})${me.section && !me.is_admin ? ` · ${me.section}` : ""}`;
   const nav = $("#nav");
-  nav.innerHTML = me.is_admin
-    ? `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
-       <button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>`
-    : "";
+  const tab = (v, label) => `<button class="ghost small ${view === v ? "active" : ""}" data-view="${v}">${label}</button>`;
+  nav.innerHTML = tab("student", "My hours") + tab("classmates", "Classmates") + (me.is_admin ? tab("admin", "Admin panel") : "");
   nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
-  const page = view === "admin" && me.is_admin ? renderAdmin(data?.overview) : renderStudent(data);
+  const page = view === "admin" && me.is_admin ? renderAdmin(data?.overview)
+    : view === "classmates" ? renderClassmates()
+    : renderStudent(data);
   page.catch(ex => fatal(ex.message));
 }
 
@@ -528,7 +551,7 @@ async function logOut(button) {
 $("#logout").onclick = e => logOut(e.target);
 
 onAuthStateChanged(auth, async user => {
-  if (!user) { me = null; last = null; view = "student"; return render(); }
+  if (!user) { me = null; last = null; classmates = null; cmSection = null; view = "student"; return render(); }
   // Show what we had last time straight away, then refresh it.
   const saved = loadSaved(user.email.toLowerCase());
   if (saved?.user) {
@@ -546,9 +569,9 @@ onAuthStateChanged(auth, async user => {
     last = data;
     remember({});
     me = data.user;
-    if (!me.is_admin) view = "student";
+    if (!me.is_admin && view === "admin") view = "student";
     if (!saved) view = me.is_admin ? "admin" : "student";
-    if (!saved || (changed && !dirty)) render(data);
+    if (!saved || (changed && !dirty && view !== "classmates")) render(data);
   } catch (ex) {
     // Keep saved data for connection problems; anything else (e.g. removed from the class list) clears it.
     if (!/reach the server|too long/.test(ex.message)) forget();
@@ -658,6 +681,60 @@ async function renderStudent(data) {
       await reload(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })));
     } catch (ex) { $(".status", form).textContent = ex.message; }
   };
+}
+
+// ---------- classmates ----------
+// Everyone's hours and notes for one week. Shows the last copy straight away, then refreshes it.
+let classmates = null;
+let cmWeek = null;
+let cmSection = null; // null until first shown; then defaults to your own section
+let cmSort = "name";
+
+async function renderClassmates() {
+  if (classmates) drawClassmates();
+  else loading();
+  const fresh = await api("classmates");
+  const changed = JSON.stringify(fresh) !== JSON.stringify(classmates);
+  classmates = fresh;
+  if (view === "classmates" && changed) drawClassmates();
+}
+
+function drawClassmates() {
+  const { weeks, students } = classmates;
+  const sections = classmates.sections || ["Section 1", "Section 2"];
+  const open = weeks.filter(started);
+  app.replaceChildren($("#tpl-classmates").content.cloneNode(true));
+  if (!open.length) { $("#cm-list").innerHTML = `<p class="muted">No weeks have started yet.</p>`; return; }
+  if (!open.some(w => w.id === cmWeek)) cmWeek = defaultWeek(open);
+  if (cmSection === null || (cmSection && !sections.includes(cmSection))) cmSection = sections.includes(me?.section) ? me.section : "";
+  $("#cm-week").innerHTML = [...open].reverse().map(w => `<option value="${w.id}" ${w.id === cmWeek ? "selected" : ""}>${esc(weekName(w))} (${range(w)})</option>`).join("");
+  $("#cm-section").innerHTML = `<option value="">All sections</option>` + sections.map(n => `<option ${n === cmSection ? "selected" : ""}>${esc(n)}</option>`).join("");
+  $("#cm-sort").value = cmSort;
+
+  const week = open.find(w => w.id === cmWeek);
+  const shown = students.filter(s => !cmSection || s.section === cmSection);
+  const logged = shown.filter(s => s.entries[cmWeek]?.hours > 0)
+    .sort((a, b) => cmSort === "hours" ? b.entries[cmWeek].hours - a.entries[cmWeek].hours || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
+  const total = logged.reduce((t, s) => t + s.entries[cmWeek].hours, 0);
+  $("#cm-stats").innerHTML =
+    stat(week.no_class ? "no class" : `${logged.length}/${shown.length}`, "Have logged this week") +
+    stat(hrs(total), "Hours logged") +
+    stat(logged.length ? hrs(total / logged.length) : "0", "Average per student who logged");
+
+  $("#cm-list").innerHTML = logged.map(s => {
+    const e = s.entries[cmWeek];
+    return `<div class="mate ${s.you ? "you" : ""}">
+      <div class="mate-head">
+        <strong>${esc(s.name)}${s.you ? '<span class="badge">you</span>' : ""}${cmSection ? "" : ` <span class="muted" style="font-weight:400;font-size:13px">${esc(s.section)}</span>`}</strong>
+        <span class="total">${hrs(e.hours)} h</span>
+      </div>
+      <div class="desc">${esc(e.description)}</div>
+    </div>`;
+  }).join("") || `<p class="muted">${week.no_class ? "No class this week." : "Nobody has logged hours for this week yet."}</p>`;
+
+  $("#cm-week").onchange = e => { cmWeek = Number(e.target.value); drawClassmates(); };
+  $("#cm-section").onchange = e => { cmSection = e.target.value; drawClassmates(); };
+  $("#cm-sort").onchange = e => { cmSort = e.target.value; drawClassmates(); };
 }
 
 // ---------- admin ----------

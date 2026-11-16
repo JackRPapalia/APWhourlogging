@@ -57,4 +57,5 @@ Then open http://localhost:8000. Opening `index.html` straight from Finder won't
 ## Security notes
 
 - `config.js` is public on purpose: Firebase web config isn't a secret, and neither is the script URL. What protects the data is the Apps Script, which checks each request's Firebase ID token with Google and allows admin actions only for users whose role is `admin`.
+- **Logging out ends the login on the server too.** Google accepts a login token for up to an hour, even after you log out, so on logout the Apps Script records the time (in its Script Properties) and refuses any token from a sign-in before then. This logs you out on every device you were signed in on.
 - Only emails on the class list can sign in. Anyone else gets a message telling them to ask their teacher.

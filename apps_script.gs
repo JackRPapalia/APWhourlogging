@@ -24,7 +24,7 @@ const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
 // Sent with every response so the site can tell admins when this script needs redeploying.
 // Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 4;
+const SCRIPT_VERSION = 5;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -105,11 +105,6 @@ function lock_() {
 }
 
 function route_(body, auth) {
-  // Logging out works even for someone who has since been removed from the class list.
-  if (body.action === 'logout') {
-    signOut_(auth, body.idToken);
-    return { ok: true };
-  }
   // Loading the page ("me") counts as signing in; saves and other actions don't.
   const me = registerUser_(auth, body.name, body.action === 'me');
   const requireAdmin = () => { if (!me.is_admin) fail_('Admins only'); };
@@ -174,16 +169,14 @@ function route_(body, auth) {
 
 // ---------- auth ----------
 
-// Checks a Firebase ID token with Google and returns { uid, email, name, auth_time }.
-// Google accepts a token until it expires (up to an hour), even after the person logs out,
-// so tokens from a sign-in before their last logout are refused here.
+// Checks a Firebase ID token with Google and returns { uid, email, name }.
 function verifyToken_(idToken) {
   if (FIREBASE_API_KEY.indexOf('PASTE') === 0) fail_('Set FIREBASE_API_KEY in the Apps Script first');
   if (!idToken) fail_('Please log in');
   const cache = CacheService.getScriptCache();
-  const key = tokenKey_(idToken);
+  const key = 'tok:' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken));
   const hit = cache.get(key);
-  if (hit) return notSignedOut_(JSON.parse(hit));
+  if (hit) return JSON.parse(hit);
   const res = UrlFetchApp.fetch(
     'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(FIREBASE_API_KEY),
     { method: 'post', contentType: 'application/json', payload: JSON.stringify({ idToken }), muteHttpExceptions: true }
@@ -191,45 +184,9 @@ function verifyToken_(idToken) {
   const data = JSON.parse(res.getContentText() || '{}');
   const user = data.users && data.users[0];
   if (res.getResponseCode() !== 200 || !user || !user.email || user.disabled) fail_('Your login expired. Please log in again.');
-  // Google has just vouched for the token, so its payload can be trusted. auth_time is when
-  // the person actually signed in; tokens refreshed from that sign-in keep the same value.
-  const claims = tokenClaims_(idToken);
-  const authTime = Number(claims.auth_time || claims.iat) * 1000;
-  if (!authTime) fail_('Your login expired. Please log in again.');
-  const auth = { uid: user.localId, email: String(user.email).toLowerCase(), name: user.displayName || '', auth_time: authTime };
-  notSignedOut_(auth);
+  const auth = { uid: user.localId, email: String(user.email).toLowerCase(), name: user.displayName || '' };
   cache.put(key, JSON.stringify(auth), 600);
   return auth;
-}
-
-function tokenKey_(idToken) {
-  return 'tok:' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken));
-}
-
-// The JSON payload (middle part) of a JWT.
-function tokenClaims_(idToken) {
-  try {
-    let part = String(idToken).split('.')[1];
-    while (part.length % 4) part += '=';
-    return JSON.parse(Utilities.newBlob(Utilities.base64DecodeWebSafe(part)).getDataAsString());
-  } catch (err) {
-    fail_('Your login expired. Please log in again.');
-  }
-}
-
-const SIGNED_OUT_PREFIX = 'signed_out:';
-
-// Refuses a login from before this person's last logout.
-function notSignedOut_(auth) {
-  const out = Number(PropertiesService.getScriptProperties().getProperty(SIGNED_OUT_PREFIX + auth.email)) || 0;
-  if (!auth.auth_time || auth.auth_time <= out) fail_('You logged out. Please log in again.');
-  return auth;
-}
-
-// Logging out: every token from a sign-in up to now stops working, on every device.
-function signOut_(auth, idToken) {
-  PropertiesService.getScriptProperties().setProperty(SIGNED_OUT_PREFIX + auth.email, String(Date.now()));
-  CacheService.getScriptCache().remove(tokenKey_(idToken));
 }
 
 // Lets the user in only if they're on a roster tab, records their name the first time,

@@ -294,7 +294,7 @@ import { firebaseConfig, SCRIPT_URL } from "./config.js";
 const $ = (sel, root = document) => root.querySelector(sel);
 const SCHOOL_DOMAIN = "trevor.org";
 // The Apps Script version this page was built for (SCRIPT_VERSION in apps_script.gs).
-const EXPECTED_SCRIPT_VERSION = 4;
+const EXPECTED_SCRIPT_VERSION = 5;
 const SCRIPT_FILE_URL = "https://github.com/JackRPapalia/APWhourlogging/blob/main/apps_script.gs";
 let scriptVersion = null; // from the latest response; 0 means a script from before versions existed
 const app = $("#app");
@@ -501,7 +501,7 @@ function fatal(msg) {
     <button class="small" id="retry">Try again</button>
     ${auth.currentUser ? `<button class="ghost small" id="switch">Use a different account</button>` : ""}</div>`;
   $("#retry").onclick = () => location.reload();
-  if (auth.currentUser) $("#switch").onclick = e => logOut(e.target);
+  if (auth.currentUser) $("#switch").onclick = () => signOut(auth);
 }
 
 // Runs fn while a button shows a busy label, so slow sheet calls don't look frozen.
@@ -541,14 +541,7 @@ function render(data = last) {
   page.catch(ex => fatal(ex.message));
 }
 
-// Tell the server first so this login's token stops working there too (Google would
-// otherwise accept it until it expires), then sign out here even if the server can't be reached.
-async function logOut(button) {
-  forget();
-  try { await busy(button, "Logging out…", () => api("logout")); } catch { /* sign out locally anyway */ }
-  await signOut(auth);
-}
-$("#logout").onclick = e => logOut(e.target);
+$("#logout").onclick = () => { forget(); signOut(auth); };
 
 onAuthStateChanged(auth, async user => {
   if (!user) { me = null; last = null; classmates = null; cmSection = null; view = "student"; return render(); }

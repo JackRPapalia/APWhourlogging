@@ -4,12 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>APW Hours Log</title>
-<link rel="preconnect" href="https://script.google.com" crossorigin>
-<link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
-<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
-<link rel="preconnect" href="https://securetoken.googleapis.com" crossorigin>
-<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js">
-<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js">
 <style>
   :root {
     --bg: #f5f6f8; --card: #fff; --text: #1c1f24; --muted: #646b75; --border: #dde1e6;
@@ -30,7 +24,8 @@
   header nav { display: flex; gap: 4px; margin-left: 8px; }
   header .spacer { flex: 1; }
   header .who { color: var(--muted); font-size: 14px; }
-  main { max-width: 980px; margin: 24px auto; padding: 0 16px; }
+  /* Wide enough to fill a full-width Google Sites embed; the cap only keeps lines readable on very large screens. */
+  main { max-width: 1400px; margin: 16px auto; padding: 0 16px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
   h2 { font-size: 16px; margin: 0 0 14px; }
   label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
@@ -38,7 +33,7 @@
   textarea { resize: vertical; min-height: 60px; }
   button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
   a.button { display: inline-block; font-size: 13px; padding: 4px 10px; border-radius: 6px; background: var(--accent); color: #fff; text-decoration: none; border: 1px solid var(--accent); }
-  button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  button.ghost, a.button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   button.small { padding: 4px 10px; font-size: 13px; }
   button.danger { background: transparent; color: var(--danger); border-color: transparent; }
@@ -46,7 +41,6 @@
   .error { color: var(--danger); font-size: 14px; min-height: 20px; margin-top: 8px; }
   .ok { color: var(--ok); }
   .muted { color: var(--muted); }
-  .auth { max-width: 380px; margin: 60px auto; }
   .week { border-top: 1px solid var(--border); padding: 16px 0; }
   .week:first-child { border-top: 0; padding-top: 0; }
   .week-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
@@ -113,9 +107,6 @@
   .bulk td input[type=checkbox] { width: auto; }
   th .sub.noclass, .noclass-cell { color: var(--muted); font-style: italic; }
   .excused { color: var(--muted); font-style: italic; }
-  .mate { border-top: 1px solid var(--border); padding: 12px 0; }
-  .mate-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  .mate.you { background: var(--accent-soft); margin: 0 -12px; padding: 12px; border-radius: 8px; border-top-color: transparent; }
   .banner { max-width: 980px; margin: 16px auto 0; padding: 12px 16px; border: 1px solid var(--danger); border-radius: 10px; background: var(--card); font-size: 14px; width: calc(100% - 32px); }
   .banner strong { color: var(--danger); }
   .banner a, .card a:not(.button) { color: var(--accent); }
@@ -138,26 +129,14 @@
   <h1>APW Hours Log</h1>
   <nav id="nav"></nav>
   <span class="spacer"></span>
-  <span class="muted hidden" id="sync" style="font-size:13px">Updating…</span>
   <span class="who" id="who"></span>
-  <button class="ghost small" id="logout">Log out</button>
+  <!-- Opens the app in its own tab, outside the Google Sites embed. Hidden in that tab. -->
+  <a class="button ghost hidden" id="fullscreen" target="_blank" rel="noopener">Open full screen ↗</a>
 </header>
-
-<div class="banner hidden" id="script-warning" role="status"></div>
 
 <main id="app"><p class="loading">Loading…</p></main>
 
 <footer class="credits">Created by Jack Papalia ’27, data sourcing inspired by Leyna Director ’27</footer>
-
-<template id="tpl-auth">
-  <div class="card auth">
-    <h2>APW Hours Log</h2>
-    <p class="muted" style="font-size:14px;margin:-6px 0 18px">Sign in with your Google account to log your hours.</p>
-    <button type="button" id="google" style="width:100%">Sign in with Google</button>
-    <p style="text-align:center;margin:10px 0 0"><button type="button" class="ghost small" id="google-other" style="border:0;color:var(--muted)">Not a @trevor.org account? Use another Google account</button></p>
-    <div class="error" id="auth-error"></div>
-  </div>
-</template>
 
 <template id="tpl-student">
   <div class="card">
@@ -174,23 +153,17 @@
   </div>
 </template>
 
-<template id="tpl-classmates">
+<template id="tpl-class">
   <div class="card">
-    <h2>What classmates logged</h2>
+    <h2>Class hours</h2>
     <div class="toolbar">
-      <label for="cm-week">Week</label>
-      <select id="cm-week"></select>
-      <label for="cm-section">Section</label>
-      <select id="cm-section"></select>
+      <label for="c-section">Section</label>
+      <select id="c-section"></select>
       <span class="grow"></span>
-      <label for="cm-sort">Sort</label>
-      <select id="cm-sort">
-        <option value="name">Name</option>
-        <option value="hours">Most hours</option>
-      </select>
+      <button class="ghost small" id="c-refresh">Refresh</button>
     </div>
-    <div class="stat-row" id="cm-stats"></div>
-    <div id="cm-list"></div>
+    <div class="table-wrap"><table id="c-table"></table></div>
+    <p class="muted" style="font-size:13px;margin:10px 0 0">Hover over a number (or tap it) to see what that classmate worked on.</p>
   </div>
 </template>
 
@@ -211,6 +184,7 @@
         <option value="login">Last sign-in</option>
       </select>
       <button class="ghost small" id="export">Export CSV</button>
+      <button class="ghost small" id="refresh">Refresh</button>
       <button class="small" id="add-people">Add people</button>
     </div>
     <div class="stat-row" id="class-stats"></div>
@@ -279,101 +253,50 @@
 </template>
 
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getAuth, onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut,
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { firebaseConfig, SCRIPT_URL } from "./config.js";
-
+// This page is served by Code.gs in the same Apps Script project and talks to it with
+// google.script.run. Google tells the script who's signed in, so the page has no login.
 const $ = (sel, root = document) => root.querySelector(sel);
 const SCHOOL_DOMAIN = "trevor.org";
-// The Apps Script version this page was built for (SCRIPT_VERSION in apps_script.gs).
-const EXPECTED_SCRIPT_VERSION = 2;
-const SCRIPT_FILE_URL = "https://github.com/JackRPapalia/APWhourlogging/blob/main/apps_script.gs";
-let scriptVersion = null; // from the latest response; 0 means a script from before versions existed
 const app = $("#app");
 let me = null;
 let view = "student";
 
-// ---------- saved data ----------
-// The last data the server sent is kept in this browser, so returning visitors see their
-// page right away while fresh data loads in the background.
-let last = null;   // latest "me" response: { user, weeks, entries, overview? }
-let dirty = false; // someone typed since the last render; a background refresh mustn't wipe it
-const savedKey = email => `apw:v1:${email}`;
-function loadSaved(email) {
-  try { return fixWeeks(JSON.parse(localStorage.getItem(savedKey(email)))); } catch { return null; }
-}
+// ---------- current data ----------
+// Nothing is saved in the browser: the page only knows who you are once the script says,
+// so saved data could show one person's hours to the next person on a shared computer.
+let last = null;   // latest "me" response: { user, weeks, entries, settings, site_url, overview? }
 function remember(patch) {
-  if (!last) return;
-  Object.assign(last, patch);
-  try { localStorage.setItem(savedKey(last.user.email), JSON.stringify(last)); } catch { /* storage full or blocked */ }
+  if (last) Object.assign(last, patch);
 }
-function forget() {
-  last = null;
-  try { Object.keys(localStorage).filter(k => k.startsWith("apw:")).forEach(k => localStorage.removeItem(k)); } catch { /* blocked */ }
-}
-const syncing = on => $("#sync").classList.toggle("hidden", !on);
-app.addEventListener("input", () => { dirty = true; });
 // Browsers change a focused number box when you scroll over it, which makes the page hard
 // to scroll. Unfocus the box instead, so the wheel scrolls the page and the value stays put.
 document.addEventListener("wheel", e => {
   if (e.target instanceof HTMLInputElement && e.target.type === "number" && e.target === document.activeElement) e.target.blur();
 }, { passive: true });
 
-if (firebaseConfig.apiKey.startsWith("PASTE")) {
-  app.innerHTML = `<div class="card auth"><h2>Almost there</h2><p class="muted">Paste your Firebase web config into <code>config.js</code> to turn on login. See the README for the steps.</p></div>`;
-  throw new Error("Firebase config missing");
-}
-const auth = getAuth(initializeApp(firebaseConfig));
-
 // ---------- helpers ----------
-// Calls the Apps Script backend with the signed-in user's Firebase ID token.
-// The body is sent as text/plain so the browser doesn't need a CORS preflight.
-async function api(action, data = {}) {
-  const user = auth.currentUser;
-  if (!user) throw new Error("Please log in");
-  const idToken = await user.getIdToken();
-  // Give up after 45 s so a stuck request can't leave the page loading forever.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 45000);
-  let out;
-  try {
-    const res = await fetch(SCRIPT_URL, { method: "POST", body: JSON.stringify({ ...data, action, idToken }), signal: controller.signal });
-    out = await res.json();
-  } catch (ex) {
-    throw new Error(ex.name === "AbortError"
-      ? "The server took too long to respond. Try again."
-      : "Couldn't reach the server. Check your connection and try again.");
-  } finally {
-    clearTimeout(timer);
-  }
-  scriptVersion = Number(out.version) || 0;
-  versionBanner();
-  if (out.error) throw new Error(out.error);
-  return fixWeeks(out);
+// Calls api() in Code.gs. Nothing about who you are is sent: the script asks Google.
+function api(action, data = {}) {
+  return new Promise((resolve, reject) => {
+    const unreachable = "Couldn't reach the server. Check your connection and try again.";
+    // Give up after 45 s so a stuck request can't leave the page loading forever.
+    const timer = setTimeout(() => reject(new Error("The server took too long to respond. Try again.")), 45000);
+    google.script.run
+      .withSuccessHandler(text => {
+        clearTimeout(timer);
+        let out;
+        try { out = JSON.parse(text); } catch { return reject(new Error(unreachable)); }
+        if (out.error) return reject(new Error(out.error));
+        if (out.overview) out.overview.loaded_at = Date.now(); // so the admin panel knows how old it is
+        resolve(fixWeeks(out));
+      })
+      .withFailureHandler(() => { clearTimeout(timer); reject(new Error(unreachable)); })
+      .api({ ...data, action });
+  });
 }
 
 // Dates typed into the sheet by hand may lack leading zeros ("2026-10-4") or use
 // month/day/year; normalize them so they sort and compare correctly as text.
-// Tells admins when the deployed Apps Script is older than this page (or, rarely, newer:
-// then the browser is showing an old copy of the page). Students can't fix it, so they don't see it.
-function versionBanner() {
-  const el = $("#script-warning");
-  const show = me?.is_admin && scriptVersion !== null && scriptVersion !== EXPECTED_SCRIPT_VERSION;
-  el.classList.toggle("hidden", !show);
-  if (!show) return;
-  el.innerHTML = scriptVersion > EXPECTED_SCRIPT_VERSION
-    ? `<strong>This page is out of date.</strong> Press ⌘⇧R (or Ctrl+Shift+R) to load the latest version.`
-    : `<strong>The Apps Script needs updating.</strong> Some features won't work until it's redeployed
-       (deployed version: ${scriptVersion || "older than 1"}, this site expects ${EXPECTED_SCRIPT_VERSION}).
-       <ol>
-         <li>Open the spreadsheet, then <b>Extensions → Apps Script</b>.</li>
-         <li>Replace all the code with the latest <a href="${SCRIPT_FILE_URL}" target="_blank" rel="noopener">apps_script.gs</a>, then save.</li>
-         <li><b>Deploy → Manage deployments</b>, click the pencil icon, choose <b>New version</b>, then <b>Deploy</b>.</li>
-       </ol>`;
-}
-
 function fixDate(v) {
   const s = String(v ?? "").trim(), pad = n => String(n).padStart(2, "0");
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
@@ -492,10 +415,9 @@ function loading() {
 }
 function fatal(msg) {
   app.innerHTML = `<div class="card"><p class="error" style="margin:0 0 12px">${esc(msg)}</p>
-    <button class="small" id="retry">Try again</button>
-    ${auth.currentUser ? `<button class="ghost small" id="switch">Use a different account</button>` : ""}</div>`;
-  $("#retry").onclick = () => location.reload();
-  if (auth.currentUser) $("#switch").onclick = () => signOut(auth);
+    <p class="muted" style="font-size:13px;margin:0 0 12px">Using the wrong Google account? Switch to your @${SCHOOL_DOMAIN} account in the top-right corner of the page, then try again.</p>
+    <button class="small" id="retry">Try again</button></div>`;
+  $("#retry").onclick = start;
 }
 
 // Runs fn while a button shows a busy label, so slow sheet calls don't look frozen.
@@ -506,83 +428,53 @@ async function busy(button, label, fn) {
   try { return await fn(); } finally { button.disabled = false; button.textContent = old; }
 }
 
-function authMessage(ex) {
-  const messages = {
-    "auth/too-many-requests": "Too many attempts. Wait a minute and try again.",
-    "auth/popup-blocked": "Your browser blocked the Google sign-in window. Allow popups for this site and try again.",
-    "auth/popup-closed-by-user": "",
-    "auth/cancelled-popup-request": "",
-    "auth/operation-not-allowed": "That sign-in method isn't turned on in Firebase yet.",
-    "auth/unauthorized-domain": "This website isn't on Firebase's list of authorized domains yet.",
-  };
-  return ex.code in messages ? messages[ex.code] : ex.message;
-}
-
 // ---------- top-level ----------
 function render(data = last) {
-  dirty = false;
-  versionBanner();
   $("#topbar").classList.toggle("hidden", !me);
-  if (!me) return renderAuth();
+  if (!me) return;
   $("#who").textContent = `${me.name} (${me.email})${me.section && !me.is_admin ? ` · ${me.section}` : ""}`;
   const nav = $("#nav");
-  const tab = (v, label) => `<button class="ghost small ${view === v ? "active" : ""}" data-view="${v}">${label}</button>`;
-  nav.innerHTML = tab("student", "My hours") + tab("classmates", "Classmates") + (me.is_admin ? tab("admin", "Admin panel") : "");
+  nav.innerHTML =
+    `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
+     <button class="ghost small ${view === "class" ? "active" : ""}" data-view="class">Class</button>` +
+    (me.is_admin ? `<button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>` : "");
   nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
-  const page = view === "admin" && me.is_admin ? renderAdmin(data?.overview)
-    : view === "classmates" ? renderClassmates()
-    : renderStudent(data);
+  // The admin panel reuses the overview it already has, unless that's more than 2 minutes old.
+  const overview = data?.overview && Date.now() - (data.overview.loaded_at || 0) < 120000 ? data.overview : undefined;
+  const page = view === "admin" && me.is_admin ? renderAdmin(overview) : view === "class" ? renderClass() : renderStudent(data);
   page.catch(ex => fatal(ex.message));
 }
 
-$("#logout").onclick = () => { forget(); signOut(auth); };
-
-onAuthStateChanged(auth, async user => {
-  if (!user) { me = null; last = null; classmates = null; cmSection = null; view = "student"; return render(); }
-  // Show what we had last time straight away, then refresh it.
-  const saved = loadSaved(user.email.toLowerCase());
-  if (saved?.user) {
-    last = saved;
-    me = saved.user;
-    view = me.is_admin ? "admin" : "student";
-    render(saved);
-    syncing(true);
-  } else {
-    loading();
-  }
+// Loads everything for whoever Google says is signed in. Admins land on the admin panel.
+async function start() {
+  me = null;
+  last = null;
+  $("#topbar").classList.add("hidden");
+  loading();
   try {
-    const data = await api("me", { name: user.displayName || "", withOverview: true });
-    const changed = JSON.stringify(data) !== JSON.stringify(saved);
+    const data = await api("me", { withOverview: true });
     last = data;
-    remember({});
     me = data.user;
-    if (!me.is_admin && view === "admin") view = "student";
-    if (!saved) view = me.is_admin ? "admin" : "student";
-    if (!saved || (changed && !dirty && view !== "classmates")) render(data);
+    view = me.is_admin ? "admin" : "student";
+    render(data);
+    showFullScreenLink(data.app_url);
   } catch (ex) {
-    // Keep saved data for connection problems; anything else (e.g. removed from the class list) clears it.
-    if (!/reach the server|too long/.test(ex.message)) forget();
     fatal(ex.message);
-  } finally {
-    syncing(false);
   }
-});
+}
+start();
 
-// ---------- auth ----------
-function renderAuth() {
-  app.replaceChildren($("#tpl-auth").content.cloneNode(true));
-  const err = $("#auth-error");
-  // `hd` makes Google's account picker show @trevor.org accounts first; it's only a hint,
-  // so people on another domain (e.g. a staff address) use the second button.
-  const signIn = (button, params) => async () => {
-    err.textContent = "";
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: "select_account", ...params });
-    try { await busy(button, "Signing in…", () => signInWithPopup(auth, provider)); }
-    catch (ex) { err.textContent = authMessage(ex); }
-  };
-  $("#google").onclick = signIn($("#google"), { hd: SCHOOL_DOMAIN });
-  $("#google-other").onclick = signIn($("#google-other"), {});
+// The "Open full screen" link opens this app at its own address with ?full=1, and the copy
+// opened that way hides the link. google.script.url reads the real address of the app,
+// since this page itself runs inside Google's frame.
+function showFullScreenLink(appUrl) {
+  if (!appUrl) return;
+  google.script.url.getLocation(loc => {
+    if (loc?.parameter?.full) return;
+    const link = $("#fullscreen");
+    link.href = appUrl + (appUrl.includes("?") ? "&" : "?") + "full=1";
+    link.classList.remove("hidden");
+  });
 }
 
 // ---------- student ----------
@@ -592,26 +484,29 @@ async function renderStudent(data) {
   const { weeks } = data;
   let { entries } = data;
   const open = weeks.filter(started).reverse();
-
   const cur = weeks.find(isCurrent);
-  const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
-  $("#my-stats").innerHTML =
-    stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${esc(weekName(cur))})` : "No week in progress") +
-    stat(hrs(total), "Total hours") +
-    // No-class weeks and weeks you're excused from don't count toward "weeks logged".
-    stat(`${open.filter(w => entries[w.id]?.hours > 0).length}/${open.filter(w => !w.no_class && !entries[w.id]?.excused).length}`, "Weeks logged");
 
-  drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, {
-    selected: cur?.id,
-    tooltip: (w, v) => w.no_class && !v ? `${weekName(w)}: no class` : entries[w.id]?.excused ? `${weekName(w)}: excused` : `${weekName(w)}: ${hrs(v)} h`,
-  });
+  // The numbers and chart at the top. Redrawn on their own after a save.
+  const drawSummary = () => {
+    const total = Object.values(entries).reduce((s, e) => s + e.hours, 0);
+    $("#my-stats").innerHTML =
+      stat(cur ? hrs(entries[cur.id]?.hours || 0) : "–", cur ? `Hours this week (${esc(weekName(cur))})` : "No week in progress") +
+      stat(hrs(total), "Total hours") +
+      // No-class weeks and weeks you're excused from don't count toward "weeks logged".
+      stat(`${open.filter(w => entries[w.id]?.hours > 0).length}/${open.filter(w => !w.no_class && !entries[w.id]?.excused).length}`, "Weeks logged");
+    drawWeekChart($("#my-chart"), weeks, w => entries[w.id]?.hours || 0, {
+      selected: cur?.id,
+      tooltip: (w, v) => w.no_class && !v ? `${weekName(w)}: no class` : entries[w.id]?.excused ? `${weekName(w)}: excused` : `${weekName(w)}: ${hrs(v)} h`,
+    });
+  };
+  drawSummary();
 
   const list = $("#my-weeks");
   if (!open.length) {
     list.innerHTML = `<p class="muted">${weeks.length ? `The first week starts ${range(weeks[0])}.` : "Your teacher hasn't set up any weeks yet."}</p>`;
     return;
   }
-  list.innerHTML = open.map(w => {
+  const weekCard = w => {
     const e = entries[w.id];
     const head = `
       <div class="week-head">
@@ -620,10 +515,10 @@ async function renderStudent(data) {
       </div>`;
     const excuseNote = e?.excused ? `<p class="excused" style="margin:0 0 10px;font-size:14px">Your teacher excused you from this week${e.description ? ` (${esc(e.description)})` : ""}.${closedForMe(w) ? "" : " If you did some work anyway, you can still log it."}</p>` : "";
     if (w.no_class && !e) {
-      return `<div class="week">${head}<p class="muted" style="margin:0;font-size:14px">No class this week, so there's nothing to log.</p></div>`;
+      return `<div class="week" data-week="${w.id}">${head}<p class="muted" style="margin:0;font-size:14px">No class this week, so there's nothing to log.</p></div>`;
     }
     if (closedForMe(w) || (w.no_class && !me?.is_admin)) {
-      return `<div class="week">${head}
+      return `<div class="week" data-week="${w.id}">${head}
         ${e?.excused ? excuseNote
           : e ? `<div class="closed-entry"><strong>${hrs(e.hours)} h</strong><div class="desc">${esc(e.description)}</div></div>`
           : `<p class="muted" style="margin:0;font-size:14px">Not logged. This week closed on ${dueText(w)}; ask your teacher if you need to add hours.</p>`}
@@ -642,11 +537,27 @@ async function renderStudent(data) {
         </div>
       </div>
     </form>`;
-  }).join("");
+  };
+  list.innerHTML = open.map(weekCard).join("");
 
-  const reload = async result => {
-    remember({ entries: result.entries });
-    await renderStudent({ ...data, weeks, entries: result.entries });
+  list.oninput = ev => {
+    const status = ev.target.closest("form.week")?.querySelector(".status");
+    if (status) { status.className = "status muted"; status.textContent = "Not saved yet"; }
+  };
+  // After a save, only that week's card and the numbers at the top are redrawn. The rest
+  // of the page stays put, so the scroll position and text typed into other weeks are kept.
+  const applied = (result, form, message) => {
+    entries = result.entries;
+    // For admins the response carries a fresh overview, so the admin panel shows the change too.
+    remember(result.overview ? { entries, overview: result.overview } : { entries });
+    drawSummary();
+    const box = document.createElement("div");
+    box.innerHTML = weekCard(weeks.find(w => String(w.id) === form.dataset.week));
+    const card = box.firstElementChild;
+    form.replaceWith(card);
+    const status = $(".status", card);
+    if (status && message) status.textContent = message;
+    card.querySelector("button[type=submit]")?.focus({ preventScroll: true });
   };
   list.onsubmit = async ev => {
     ev.preventDefault();
@@ -656,7 +567,7 @@ async function renderStudent(data) {
       if (hours instanceof Error) throw hours;
       const result = await busy(form.querySelector("button[type=submit]"), "Saving…", () =>
         api("saveEntry", { week_id: Number(form.dataset.week), hours, description: form.description.value }));
-      await reload(result);
+      applied(result, form);
     } catch (ex) { status.className = "status error"; status.style.margin = 0; status.textContent = ex.message; }
   };
   list.onclick = async ev => {
@@ -664,63 +575,52 @@ async function renderStudent(data) {
     const form = ev.target.closest("form");
     if (!confirm("Clear your hours for this week?")) return;
     try {
-      await reload(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })));
+      applied(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })), form, "Cleared");
     } catch (ex) { $(".status", form).textContent = ex.message; }
   };
 }
 
-// ---------- classmates ----------
-// Everyone's hours and notes for one week. Shows the last copy straight away, then refreshes it.
-let classmates = null;
-let cmWeek = null;
-let cmSection = null; // null until first shown; then defaults to your own section
-let cmSort = "name";
-
-async function renderClassmates() {
-  if (classmates) drawClassmates();
-  else loading();
-  const fresh = await api("classmates");
-  const changed = JSON.stringify(fresh) !== JSON.stringify(classmates);
-  classmates = fresh;
-  if (view === "classmates" && changed) drawClassmates();
-}
-
-function drawClassmates() {
-  const { weeks, students } = classmates;
-  const sections = classmates.sections || ["Section 1", "Section 2"];
-  const open = weeks.filter(started);
-  app.replaceChildren($("#tpl-classmates").content.cloneNode(true));
-  if (!open.length) { $("#cm-list").innerHTML = `<p class="muted">No weeks have started yet.</p>`; return; }
-  if (!open.some(w => w.id === cmWeek)) cmWeek = defaultWeek(open);
-  if (cmSection === null || (cmSection && !sections.includes(cmSection))) cmSection = sections.includes(me?.section) ? me.section : "";
-  $("#cm-week").innerHTML = [...open].reverse().map(w => `<option value="${w.id}" ${w.id === cmWeek ? "selected" : ""}>${esc(weekName(w))} (${range(w)})</option>`).join("");
-  $("#cm-section").innerHTML = `<option value="">All sections</option>` + sections.map(n => `<option ${n === cmSection ? "selected" : ""}>${esc(n)}</option>`).join("");
-  $("#cm-sort").value = cmSort;
-
-  const week = open.find(w => w.id === cmWeek);
-  const shown = students.filter(s => !cmSection || s.section === cmSection);
-  const logged = shown.filter(s => s.entries[cmWeek]?.hours > 0)
-    .sort((a, b) => cmSort === "hours" ? b.entries[cmWeek].hours - a.entries[cmWeek].hours || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
-  const total = logged.reduce((t, s) => t + s.entries[cmWeek].hours, 0);
-  $("#cm-stats").innerHTML =
-    stat(week.no_class ? "no class" : `${logged.length}/${shown.length}`, "Have logged this week") +
-    stat(hrs(total), "Hours logged") +
-    stat(logged.length ? hrs(total / logged.length) : "0", "Average per student who logged");
-
-  $("#cm-list").innerHTML = logged.map(s => {
-    const e = s.entries[cmWeek];
-    return `<div class="mate ${s.you ? "you" : ""}">
-      <div class="mate-head">
-        <strong>${esc(s.name)}${s.you ? '<span class="badge">you</span>' : ""}${cmSection ? "" : ` <span class="muted" style="font-weight:400;font-size:13px">${esc(s.section)}</span>`}</strong>
-        <span class="total">${hrs(e.hours)} h</span>
-      </div>
-      <div class="desc">${esc(e.description)}</div>
-    </div>`;
-  }).join("") || `<p class="muted">${week.no_class ? "No class this week." : "Nobody has logged hours for this week yet."}</p>`;
-
-  $("#cm-week").onchange = e => { cmWeek = Number(e.target.value); drawClassmates(); };
-  $("#cm-section").onchange = e => { cmSection = e.target.value; drawClassmates(); };
-  $("#cm-sort").onchange = e => { cmSort = e.target.value; drawClassmates(); };
+// ---------- class (every student can see this) ----------
+let classSection = null;
+async function renderClass() {
+  // Reuse the list fetched in the last 2 minutes; otherwise get a fresh one.
+  let info = last?.classmates;
+  if (!info || Date.now() - info.loaded_at > 120000) {
+    loading();
+    info = await api("classmates");
+    info.loaded_at = Date.now();
+    remember({ classmates: info });
+  }
+  app.replaceChildren($("#tpl-class").content.cloneNode(true));
+  const { weeks, students } = info;
+  const sections = info.sections || [];
+  if (classSection === null) classSection = me.section || ""; // start on your own section
+  if (classSection && !sections.includes(classSection)) classSection = "";
+  $("#c-section").innerHTML = `<option value="">All sections</option>` + sections.map(n => `<option ${n === classSection ? "selected" : ""}>${esc(n)}</option>`).join("");
+  const draw = () => {
+    const shown = students.filter(s => !classSection || s.section === classSection);
+    $("#c-table").innerHTML = `
+      <thead><tr><th>Student</th>${classSection ? "" : "<th>Section</th>"}
+        ${weeks.map(w => `<th class="num">${esc(w.label || short(w.start))}${w.no_class ? '<span class="sub noclass">no class</span>' : w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
+        <th class="num">Total</th></tr></thead>
+      <tbody>${shown.map(s => `
+        <tr>
+          <td>${esc(s.name)}</td>
+          ${classSection ? "" : `<td>${esc(s.section)}</td>`}
+          ${weeks.map(w => {
+            const e = s.entries[w.id];
+            if (e?.excused) return `<td class="num excused" title="Excused">ex</td>`;
+            const v = e?.hours || 0;
+            if (!v && w.no_class) return `<td class="num noclass-cell" title="No class">·</td>`;
+            return `<td class="num ${v ? "" : "zero"}"${e?.description ? ` title="${esc(e.description)}"` : ""}>${v ? hrs(v) : "–"}</td>`;
+          }).join("")}
+          <td class="num"><strong>${hrs(s.total)}</strong></td>
+        </tr>`).join("") || `<tr><td colspan="${weeks.length + 3}" class="muted">Nobody here yet.</td></tr>`}
+      </tbody>`;
+  };
+  draw();
+  $("#c-section").onchange = e => { classSection = e.target.value; draw(); };
+  $("#c-refresh").onclick = () => { if (last) delete last.classmates; renderClass().catch(ex => fatal(ex.message)); };
 }
 
 // ---------- admin ----------
@@ -728,10 +628,12 @@ let adminWeek = null;
 let adminSort = "name";
 let adminSection = "";
 
-// `prefetched` is the overview that came with the sign-in response, when there is one.
+// `prefetched` is an overview that came with another response (sign-in, or a change the
+// admin just made); without one, the latest is fetched.
 async function renderAdmin(prefetched) {
   if (!prefetched) loading();
   const overview = prefetched || await api("overview");
+  overview.loaded_at = overview.loaded_at || Date.now();
   remember({ overview, weeks: overview.weeks });
   const { weeks, students: people } = overview;
   const sections = overview.sections || ["Section 1", "Section 2"];
@@ -801,12 +703,18 @@ async function renderAdmin(prefetched) {
   $("#sort").onchange = e => { adminSort = e.target.value; draw(); };
   $("#overview").onclick = e => { const tr = e.target.closest("tr[data-user]"); if (tr) showStudent(tr.dataset.user).catch(ex => alert(ex.message)); };
   $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
+  $("#refresh").onclick = () => renderAdmin().catch(ex => fatal(ex.message));
   $("#add-people").onclick = () => {
     $("#class-list").scrollIntoView({ behavior: "smooth", block: "start" });
     $("#r-emails").focus({ preventScroll: true });
   };
   $("#export").onclick = () => {
-    const q = v => `"${String(v).replace(/"/g, '""')}"`;
+    // A leading = + - @ (or tab / return) would run as a formula in Excel or Sheets; a leading ' keeps it as text.
+    const q = v => {
+      let s = String(v);
+      if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+      return `"${s.replace(/"/g, '""')}"`;
+    };
     const rows = students.filter(s => !adminSection || s.section === adminSection);
     const stamp = ms => { const d = new Date(ms); return `${isoDay(d)} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
     const lines = [["Name", "Email", "Section", "Last sign-in", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
@@ -835,14 +743,14 @@ function drawMissing(week, shown) {
     return;
   }
   const emails = missing.map(s => s.email);
-  const site = location.origin + location.pathname;
+  const site = last?.site_url || "the class website";
   const subject = `Log your hours for ${weekName(week)}`;
   const body = `Hi,\n\nYou haven't logged your hours for ${weekName(week)} (${range(week)}) yet.` +
     ` Please log them at ${site}${week.due && !isClosed(week) ? ` by ${dueText(week)}` : ""}.\n\nThanks!`;
   box.innerHTML = `
     <strong>${missing.length} of ${shown.length} haven't logged hours for ${esc(weekName(week))}</strong>${week.due ? ` <span class="muted">· ${isClosed(week) ? "closed" : "due"} ${dueText(week)}</span>` : ""}
     <div class="who">${missing.map(s => esc(s.signed_in ? s.name : s.email)).join(", ")}</div>
-    <a class="button small" href="mailto:?bcc=${encodeURIComponent(emails.join(","))}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}">Email them</a>
+    <a class="button small" target="_blank" rel="noopener" href="mailto:?bcc=${encodeURIComponent(emails.join(","))}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}">Email them</a>
     <button class="ghost small" id="copy-missing">Copy emails</button>
     <span class="muted" id="copy-msg" style="font-size:13px"></span>`;
   $("#copy-missing").onclick = async () => {
@@ -1072,7 +980,11 @@ async function showStudent(email) {
   // Admin corrections: edit or clear any week for this student, even after it closes.
   $("#detail-weeks").onclick = async ev => {
     const excuseId = Number(ev.target.dataset.excuse), unexcuseId = Number(ev.target.dataset.unexcuse);
-    const refresh = async r => { await renderAdmin(r.overview); await showStudent(email); };
+    const refresh = async r => {
+      if (email === me.email) remember({ entries: r.entries }); // keep "My hours" in step
+      await renderAdmin(r.overview);
+      await showStudent(email);
+    };
     if (excuseId) {
       const reason = prompt(`Excuse ${user.name} from ${weekName(weeks.find(w => w.id === excuseId))}? Reason (optional):`, "");
       if (reason === null) return;
@@ -1100,21 +1012,20 @@ async function showStudent(email) {
           <span class="error" style="grid-column:1/-1;margin:0;min-height:0"></span>
         </form>`;
       const form = $("form", slot), err = $(".error", form);
-      const done = async r => { await renderAdmin(r.overview); await showStudent(email); };
       form.h.focus();
       form.onsubmit = async se => {
         se.preventDefault();
         try {
           const hours = readHM(form);
           if (hours instanceof Error) throw hours;
-          await done(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours, description: form.description.value })));
+          await refresh(await busy($("button[type=submit]", form), "Saving…", () => api("saveEntry", { email, week_id: editId, hours, description: form.description.value })));
         }
         catch (ex) { err.textContent = ex.message; }
       };
       form.onclick = async ce => {
         if (ce.target.matches("[data-cancel]")) slot.innerHTML = "";
         if (ce.target.matches("[data-clear-entry]") && confirm(`Clear ${user.name}'s hours for this week?`)) {
-          try { await done(await busy(ce.target, "Clearing…", () => api("deleteEntry", { email, week_id: editId }))); }
+          try { await refresh(await busy(ce.target, "Clearing…", () => api("deleteEntry", { email, week_id: editId }))); }
           catch (ex) { err.textContent = ex.message; }
         }
       };

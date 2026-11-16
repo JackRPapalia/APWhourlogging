@@ -24,7 +24,7 @@ const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
 // Sent with every response so the site can tell admins when this script needs redeploying.
 // Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 5;
+const SCRIPT_VERSION = 1;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -32,12 +32,12 @@ const ADMINS_SHEET = 'Admins';
 const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
-const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused', 'Late reason'];
+const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused'];
 const USERS_HEADERS = ['Email', 'Name', 'Joined', 'Last login'];
 // Tabs the app manages itself: a missing column header is added instead of reported.
 const OWN_TABS = [USERS_SHEET, 'Weeks', 'Settings'];
 // Columns added by newer versions of the app; they're added to any tab that lacks them.
-const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class', 'Late reason'];
+const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class'];
 const SETTINGS_SHEET = 'Settings';
 const SETTINGS_HEADERS = ['Key', 'Value'];
 // Students can change a week until this many days after it ends, unless the admin changes it.
@@ -140,8 +140,6 @@ function route_(body, auth) {
       requireAdmin();
       saveSettings_(body);
       return { settings: settings_(), weeks: listWeeks_(), overview: overview_() };
-    case 'classmates':
-      return classmates_(me);
     case 'overview':
       requireAdmin();
       return overview_();
@@ -532,7 +530,6 @@ function hoursByUser_(weeks) {
       updated, updated_by: updatedBy || null,
       // Logged by the student after the week was over (during the grace period).
       late: !excused && !!updated && (!updatedBy || updatedBy === email) && updatedDay > week.end,
-      late_reason: excused ? '' : String(r['late reason'] || ''),
     };
   });
   return out;
@@ -578,25 +575,12 @@ function saveEntry_(me, target, body) {
   const notes = String(body.description || '').trim();
   if (!notes) fail_('Describe what you worked on this week');
   if (notes.length > 2000) fail_('Description is too long (2000 characters max)');
-  const fields = {
-    username: target.email, name: target.name, week: week.start, hours, notes,
-    updated: stamp_(), 'updated by': me.email, excused: '', // logging hours replaces an excuse
-  };
-  // Saving your own week after it ended needs a reason. Admin corrections keep whatever
-  // reason the student gave.
-  if (target.email === me.email) {
-    const lateReason = String(body.late_reason || '').trim();
-    if (today_() > week.end) {
-      if (!lateReason) fail_('This week has ended. Say why your hours are late.');
-      if (lateReason.length > 500) fail_('Late reason is too long (500 characters max)');
-      fields['late reason'] = lateReason;
-    } else {
-      fields['late reason'] = '';
-    }
-  }
   const t = table_(HOURS_SHEET, HOURS_HEADERS);
   const rows = userWeekRows_(t, target.email, week);
-  writeRow_(t, rows[0] || null, fields);
+  writeRow_(t, rows[0] || null, {
+    username: target.email, name: target.name, week: week.start, hours, notes,
+    updated: stamp_(), 'updated by': me.email, excused: '', // logging hours replaces an excuse
+  });
   deleteRows_(t, rows.slice(1)); // drop duplicates for the same week
 }
 
@@ -608,7 +592,7 @@ function excuseEntry_(me, target, body) {
   const rows = userWeekRows_(t, target.email, week);
   writeRow_(t, rows[0] || null, {
     username: target.email, name: target.name, week: week.start, hours: '', notes: reason,
-    updated: stamp_(), 'updated by': me.email, excused: 'yes', 'late reason': '',
+    updated: stamp_(), 'updated by': me.email, excused: 'yes',
   });
   deleteRows_(t, rows.slice(1));
 }
@@ -657,29 +641,6 @@ function overview_() {
     });
   });
   return { weeks, students, sections: SECTIONS, settings: settings_() };
-}
-
-// What every student in a section logged, for the Classmates page. Anyone on the class list
-// can see it, so it carries only names, hours and what they worked on: no emails, sign-in
-// times, excuse reasons or late reasons.
-function classmates_(me) {
-  const weeks = listWeeks_();
-  const hours = hoursByUser_(weeks);
-  const names = {};
-  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || '').trim(); });
-  const seen = {};
-  const students = [];
-  SECTIONS.forEach(section => rosterEmails_(section).forEach(email => {
-    if (seen[email]) return;
-    seen[email] = true;
-    const entries = {};
-    Object.keys(hours[email] || {}).forEach(id => {
-      const e = hours[email][id];
-      if (!e.excused) entries[id] = { hours: e.hours, description: e.description };
-    });
-    students.push({ name: names[email] || email.split('@')[0], section, you: email === me.email, entries });
-  }));
-  return { weeks, sections: SECTIONS, students };
 }
 
 function userEntries_(email) {

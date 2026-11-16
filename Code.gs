@@ -170,6 +170,8 @@ function route_(body, auth) {
       requireAdmin();
       saveSettings_(body);
       return { settings: settings_(), weeks: listWeeks_(), overview: overview_() };
+    case 'classmates':
+      return classmates_();
     case 'overview':
       requireAdmin();
       return overview_();
@@ -720,6 +722,32 @@ function deleteEntry_(me, target, body) {
   if (!me.is_admin && isClosed_(week)) fail_(closedMessage_(week));
   const t = table_(HOURS_SHEET, HOURS_HEADERS);
   deleteRows_(t, userWeekRows_(t, target.email, week));
+}
+
+// What everyone in the class has logged, for the Class tab every student can open.
+// Less than the admin overview: names, sections, hours and notes only - no emails,
+// sign-in times or late marks.
+function classmates_() {
+  const weeks = listWeeks_();
+  const hours = hoursByUser_();
+  const names = {};
+  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || ''); });
+  const seen = {};
+  const students = [];
+  SECTIONS.forEach(section => rosterEmails_(section).forEach(email => {
+    if (seen[email]) return;
+    seen[email] = true;
+    const mine = hours[email] || {};
+    const entries = {};
+    let total = 0;
+    Object.keys(mine).forEach(id => {
+      entries[id] = { hours: mine[id].hours, description: mine[id].description, excused: mine[id].excused };
+      total += mine[id].hours;
+    });
+    students.push({ name: names[email] || email.split('@')[0], section, entries, total: Math.round(total * 100) / 100 });
+  }));
+  students.sort((a, b) => a.name.localeCompare(b.name));
+  return { weeks, students, sections: SECTIONS };
 }
 
 // ---------- admin views ----------

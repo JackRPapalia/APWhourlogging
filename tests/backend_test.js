@@ -241,4 +241,14 @@ check('a year of rows needs no more service calls than a month', big.services <=
 check('...and no more sheet reads', big.reads === small.reads && big.reads <= 8, [small, big]);
 check('...and everyone is still in the overview', big.students === 339);
 
+// ---------- the Class tab ----------
+fresh(); setNow(2026, 10, 21);
+call(A, 'saveEntry', { week_id: 2, hours: 3, description: 'built a parser' });
+r = call(B, 'classmates');
+const mates = JSON.stringify(r.students);
+const aliceRow = r.students.find(s => s.entries[2]);
+check('students can see what classmates logged', aliceRow && aliceRow.entries[2].hours === 3 && aliceRow.entries[2].description === 'built a parser', r.students);
+check('...but not their emails or sign-in times', !mates.includes('@') && !mates.includes('last_login'), mates);
+check('...and someone off the class list cannot', /isn't on the class list/.test(call('stranger@trevor.org', 'classmates').error));
+
 log(fails ? `${fails} FAILED, ${passes} passed` : `ALL PASSED (${passes} checks)`);

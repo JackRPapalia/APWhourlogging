@@ -153,6 +153,20 @@
   </div>
 </template>
 
+<template id="tpl-class">
+  <div class="card">
+    <h2>Class hours</h2>
+    <div class="toolbar">
+      <label for="c-section">Section</label>
+      <select id="c-section"></select>
+      <span class="grow"></span>
+      <button class="ghost small" id="c-refresh">Refresh</button>
+    </div>
+    <div class="table-wrap"><table id="c-table"></table></div>
+    <p class="muted" style="font-size:13px;margin:10px 0 0">Hover over a number (or tap it) to see what that classmate worked on.</p>
+  </div>
+</template>
+
 <template id="tpl-admin">
   <div class="card">
     <h2>Class overview</h2>
@@ -420,14 +434,14 @@ function render(data = last) {
   if (!me) return;
   $("#who").textContent = `${me.name} (${me.email})${me.section && !me.is_admin ? ` · ${me.section}` : ""}`;
   const nav = $("#nav");
-  nav.innerHTML = me.is_admin
-    ? `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
-       <button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>`
-    : "";
+  nav.innerHTML =
+    `<button class="ghost small ${view === "student" ? "active" : ""}" data-view="student">My hours</button>
+     <button class="ghost small ${view === "class" ? "active" : ""}" data-view="class">Class</button>` +
+    (me.is_admin ? `<button class="ghost small ${view === "admin" ? "active" : ""}" data-view="admin">Admin panel</button>` : "");
   nav.onclick = e => { const v = e.target.dataset.view; if (v) { view = v; render(); } };
   // The admin panel reuses the overview it already has, unless that's more than 2 minutes old.
   const overview = data?.overview && Date.now() - (data.overview.loaded_at || 0) < 120000 ? data.overview : undefined;
-  const page = view === "admin" && me.is_admin ? renderAdmin(overview) : renderStudent(data);
+  const page = view === "admin" && me.is_admin ? renderAdmin(overview) : view === "class" ? renderClass() : renderStudent(data);
   page.catch(ex => fatal(ex.message));
 }
 
@@ -564,6 +578,49 @@ async function renderStudent(data) {
       applied(await busy(ev.target, "Clearing…", () => api("deleteEntry", { week_id: Number(form.dataset.week) })), form, "Cleared");
     } catch (ex) { $(".status", form).textContent = ex.message; }
   };
+}
+
+// ---------- class (every student can see this) ----------
+let classSection = null;
+async function renderClass() {
+  // Reuse the list fetched in the last 2 minutes; otherwise get a fresh one.
+  let info = last?.classmates;
+  if (!info || Date.now() - info.loaded_at > 120000) {
+    loading();
+    info = await api("classmates");
+    info.loaded_at = Date.now();
+    remember({ classmates: info });
+  }
+  app.replaceChildren($("#tpl-class").content.cloneNode(true));
+  const { weeks, students } = info;
+  const sections = info.sections || [];
+  if (classSection === null) classSection = me.section || ""; // start on your own section
+  if (classSection && !sections.includes(classSection)) classSection = "";
+  $("#c-section").innerHTML = `<option value="">All sections</option>` + sections.map(n => `<option ${n === classSection ? "selected" : ""}>${esc(n)}</option>`).join("");
+  const draw = () => {
+    const shown = students.filter(s => !classSection || s.section === classSection);
+    $("#c-table").innerHTML = `
+      <thead><tr><th>Student</th>${classSection ? "" : "<th>Section</th>"}
+        ${weeks.map(w => `<th class="num">${esc(w.label || short(w.start))}${w.no_class ? '<span class="sub noclass">no class</span>' : w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
+        <th class="num">Total</th></tr></thead>
+      <tbody>${shown.map(s => `
+        <tr>
+          <td>${esc(s.name)}</td>
+          ${classSection ? "" : `<td>${esc(s.section)}</td>`}
+          ${weeks.map(w => {
+            const e = s.entries[w.id];
+            if (e?.excused) return `<td class="num excused" title="Excused">ex</td>`;
+            const v = e?.hours || 0;
+            if (!v && w.no_class) return `<td class="num noclass-cell" title="No class">·</td>`;
+            return `<td class="num ${v ? "" : "zero"}"${e?.description ? ` title="${esc(e.description)}"` : ""}>${v ? hrs(v) : "–"}</td>`;
+          }).join("")}
+          <td class="num"><strong>${hrs(s.total)}</strong></td>
+        </tr>`).join("") || `<tr><td colspan="${weeks.length + 3}" class="muted">Nobody here yet.</td></tr>`}
+      </tbody>`;
+  };
+  draw();
+  $("#c-section").onchange = e => { classSection = e.target.value; draw(); };
+  $("#c-refresh").onclick = () => { if (last) delete last.classmates; renderClass().catch(ex => fatal(ex.message)); };
 }
 
 // ---------- admin ----------

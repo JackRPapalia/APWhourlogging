@@ -24,7 +24,7 @@ const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
 
 // Sent with every response so the site can tell admins when this script needs redeploying.
 // Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 1;
+const SCRIPT_VERSION = 2;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -32,12 +32,12 @@ const ADMINS_SHEET = 'Admins';
 const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
-const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused'];
+const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused', 'Late reason'];
 const USERS_HEADERS = ['Email', 'Name', 'Joined', 'Last login'];
 // Tabs the app manages itself: a missing column header is added instead of reported.
 const OWN_TABS = [USERS_SHEET, 'Weeks', 'Settings'];
 // Columns added by newer versions of the app; they're added to any tab that lacks them.
-const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class'];
+const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class', 'Late reason'];
 const SETTINGS_SHEET = 'Settings';
 const SETTINGS_HEADERS = ['Key', 'Value'];
 // Students can change a week until this many days after it ends, unless the admin changes it.
@@ -530,6 +530,7 @@ function hoursByUser_(weeks) {
       updated, updated_by: updatedBy || null,
       // Logged by the student after the week was over (during the grace period).
       late: !excused && !!updated && (!updatedBy || updatedBy === email) && updatedDay > week.end,
+      late_reason: excused ? '' : String(r['late reason'] || ''),
     };
   });
   return out;
@@ -575,12 +576,25 @@ function saveEntry_(me, target, body) {
   const notes = String(body.description || '').trim();
   if (!notes) fail_('Describe what you worked on this week');
   if (notes.length > 2000) fail_('Description is too long (2000 characters max)');
-  const t = table_(HOURS_SHEET, HOURS_HEADERS);
-  const rows = userWeekRows_(t, target.email, week);
-  writeRow_(t, rows[0] || null, {
+  const fields = {
     username: target.email, name: target.name, week: week.start, hours, notes,
     updated: stamp_(), 'updated by': me.email, excused: '', // logging hours replaces an excuse
-  });
+  };
+  // Saving your own week after it ended needs a reason. Admin corrections keep whatever
+  // reason the student gave.
+  if (target.email === me.email) {
+    const lateReason = String(body.late_reason || '').trim();
+    if (today_() > week.end) {
+      if (!lateReason) fail_('This week has ended. Say why your hours are late.');
+      if (lateReason.length > 500) fail_('Late reason is too long (500 characters max)');
+      fields['late reason'] = lateReason;
+    } else {
+      fields['late reason'] = '';
+    }
+  }
+  const t = table_(HOURS_SHEET, HOURS_HEADERS);
+  const rows = userWeekRows_(t, target.email, week);
+  writeRow_(t, rows[0] || null, fields);
   deleteRows_(t, rows.slice(1)); // drop duplicates for the same week
 }
 
@@ -592,7 +606,7 @@ function excuseEntry_(me, target, body) {
   const rows = userWeekRows_(t, target.email, week);
   writeRow_(t, rows[0] || null, {
     username: target.email, name: target.name, week: week.start, hours: '', notes: reason,
-    updated: stamp_(), 'updated by': me.email, excused: 'yes',
+    updated: stamp_(), 'updated by': me.email, excused: 'yes', 'late reason': '',
   });
   deleteRows_(t, rows.slice(1));
 }

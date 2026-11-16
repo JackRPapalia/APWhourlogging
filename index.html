@@ -113,6 +113,12 @@
   .bulk td input[type=checkbox] { width: auto; }
   th .sub.noclass, .noclass-cell { color: var(--muted); font-style: italic; }
   .excused { color: var(--muted); font-style: italic; }
+  .late-reason { grid-column: 1 / -1; }
+  .late-reason label { color: var(--danger); }
+  tr.group td { background: var(--bg, transparent); border-bottom: 2px solid var(--border); padding-top: 18px; font-weight: 600; }
+  tr.group:first-child td { padding-top: 8px; }
+  tr.group td.num { color: var(--muted); font-weight: 500; }
+  tr.group td.current { background: var(--accent-soft); }
   .banner { max-width: 980px; margin: 16px auto 0; padding: 12px 16px; border: 1px solid var(--danger); border-radius: 10px; background: var(--card); font-size: 14px; width: calc(100% - 32px); }
   .banner strong { color: var(--danger); }
   .banner a, .card a:not(.button) { color: var(--accent); }
@@ -265,7 +271,7 @@ import { firebaseConfig, SCRIPT_URL } from "./config.js";
 const $ = (sel, root = document) => root.querySelector(sel);
 const SCHOOL_DOMAIN = "trevor.org";
 // The Apps Script version this page was built for (SCRIPT_VERSION in apps_script.gs).
-const EXPECTED_SCRIPT_VERSION = 1;
+const EXPECTED_SCRIPT_VERSION = 2;
 const SCRIPT_FILE_URL = "https://github.com/JackRPapalia/APWhourlogging/blob/main/apps_script.gs";
 let scriptVersion = null; // from the latest response; 0 means a script from before versions existed
 const app = $("#app");
@@ -612,6 +618,7 @@ async function renderStudent(data) {
       <div class="week-form">
         ${hmInputs(`t-${w.id}`, logged?.hours, "Total time this week")}
         <div><label for="d-${w.id}">What did you work on?</label><textarea id="d-${w.id}" name="description" maxlength="2000" rows="2" required>${logged ? esc(logged.description) : ""}</textarea></div>
+        ${today() > w.end ? `<div class="late-reason"><label for="l-${w.id}">This week has ended. Why are these hours late?</label><textarea id="l-${w.id}" name="late_reason" maxlength="500" rows="2" required>${logged?.late_reason ? esc(logged.late_reason) : ""}</textarea></div>` : ""}
         <div class="actions">
           <button type="submit" class="small">${logged ? "Update" : "Save"}</button>
           ${logged ? `<button type="button" class="danger small" data-clear>Clear</button>` : ""}
@@ -632,7 +639,7 @@ async function renderStudent(data) {
       const hours = readHM(form);
       if (hours instanceof Error) throw hours;
       const result = await busy(form.querySelector("button[type=submit]"), "Saving…", () =>
-        api("saveEntry", { week_id: Number(form.dataset.week), hours, description: form.description.value }));
+        api("saveEntry", { week_id: Number(form.dataset.week), hours, description: form.description.value, late_reason: form.late_reason?.value || "" }));
       await reload(result);
     } catch (ex) { status.className = "status error"; status.style.margin = 0; status.textContent = ex.message; }
   };
@@ -689,23 +696,32 @@ async function renderAdmin(prefetched) {
       stat(hrs(weekTotal), "Class hours this week") +
       stat(logged ? hrs(weekTotal / logged) : "0", "Average per student who logged");
 
+    // Students are grouped under a heading row per section, with that section's totals.
+    const groups = [...sections, ...new Set(sorted.map(s => s.section).filter(n => !sections.includes(n)))]
+      .map(name => ({ name, members: sorted.filter(s => s.section === name) }))
+      .filter(g => g.members.length);
+    const groupRow = g => `
+        <tr class="group">
+          <td colspan="2">${esc(g.name)} <span class="muted" style="font-weight:400">· ${g.members.length} student${g.members.length === 1 ? "" : "s"}</span></td>
+          ${weeks.map(w => `<td class="num ${w.id === adminWeek ? "current" : ""}">${hrs(g.members.reduce((t, s) => t + (s.hours[w.id] || 0), 0))}</td>`).join("")}
+          <td class="num">${hrs(g.members.reduce((t, s) => t + s.total, 0))}</td>
+        </tr>`;
     $("#overview").innerHTML = `
-      <thead><tr><th>Student</th>${adminSection ? "" : "<th>Section</th>"}<th>Last sign-in</th>
+      <thead><tr><th>Student</th><th>Last sign-in</th>
         ${weeks.map(w => `<th class="num ${w.id === adminWeek ? "current" : ""}">${esc(w.label || short(w.start))}${w.no_class ? '<span class="sub noclass">no class</span>' : w.label ? `<span class="sub">${short(w.start)}</span>` : ""}</th>`).join("")}
         <th class="num">Total</th></tr></thead>
-      <tbody>${sorted.map(s => `
+      <tbody>${groups.map(g => groupRow(g) + g.members.map(s => `
         <tr class="clickable" data-user="${esc(s.email)}">
           <td>${s.signed_in ? esc(s.name) + " " : ""}<span class="muted">${esc(s.email)}</span></td>
-          ${adminSection ? "" : `<td>${esc(s.section)}</td>`}
           <td>${lastSeen(s)}</td>
           ${weeks.map(w => {
             const v = s.hours[w.id] || 0, e = s.entries?.[w.id], cls = `num ${w.id === adminWeek ? "current" : ""}`;
             if (e?.excused) return `<td class="${cls} excused" title="Excused${e.description ? ": " + esc(e.description) : ""}">ex</td>`;
             if (!v && w.no_class) return `<td class="${cls} noclass-cell" title="No class">·</td>`;
-            return `<td class="${cls} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}${e?.late ? '<span class="late" title="Logged after the week ended" aria-label="logged late"> •</span>' : ""}</td>`;
+            return `<td class="${cls} ${v ? "" : "zero"}">${v ? hrs(v) : "–"}${e?.late ? `<span class="late" title="Logged after the week ended${e.late_reason ? ": " + esc(e.late_reason) : ""}" aria-label="logged late"> •</span>` : ""}</td>`;
           }).join("")}
           <td class="num"><strong>${hrs(s.total)}</strong></td>
-        </tr>`).join("") || `<tr><td colspan="${weeks.length + 4}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
+        </tr>`).join("")).join("") || `<tr><td colspan="${weeks.length + 3}" class="muted">No students yet. Add them in the class list below.</td></tr>`}
       </tbody>`;
 
     const sum = w => shown.reduce((t, s) => t + (s.hours[w.id] || 0), 0);
@@ -730,7 +746,8 @@ async function renderAdmin(prefetched) {
   };
   $("#export").onclick = () => {
     const q = v => `"${String(v).replace(/"/g, '""')}"`;
-    const rows = students.filter(s => !adminSection || s.section === adminSection);
+    const rows = students.filter(s => !adminSection || s.section === adminSection)
+      .sort((a, b) => sections.indexOf(a.section) - sections.indexOf(b.section) || a.name.localeCompare(b.name));
     const stamp = ms => { const d = new Date(ms); return `${isoDay(d)} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
     const lines = [["Name", "Email", "Section", "Last sign-in", ...weeks.map(w => `${weekName(w)} (${w.start} to ${w.end})`), "Total"].map(q).join(",")];
     for (const s of rows) lines.push([s.signed_in ? s.name : "", s.email, s.section, s.last_login ? stamp(s.last_login) : (s.signed_in ? "" : "never"), ...weeks.map(w => s.hours[w.id] || 0), s.total].map(q).join(","));
@@ -987,7 +1004,7 @@ async function showStudent(email) {
               : !e && !w.no_class ? `<button class="ghost small" data-excuse="${w.id}">Excuse</button>` : ""}</span>
         </div>
         ${e?.excused ? `<div class="desc excused">${e.description ? esc(e.description) : "No reason given"}</div>${updatedText(e)}`
-          : e ? `<div class="desc">${esc(e.description)}</div>${updatedText(e)}` : ""}
+          : e ? `<div class="desc">${esc(e.description)}</div>${e.late_reason ? `<div class="desc" style="margin-top:4px"><span class="late">Late because:</span> ${esc(e.late_reason)}</div>` : ""}${updatedText(e)}` : ""}
         <div class="edit-slot"></div>
       </div>`;
   }).join("") || `<p class="muted">No weeks have started yet.</p>`;

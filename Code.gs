@@ -1,30 +1,38 @@
 /**
- * APW Hours Log — backend for the GitHub Pages site.
+ * APW Hours Log — an Apps Script web app, embedded in a Google Site.
  *
- * Paste this into the spreadsheet's Extensions → Apps Script editor, set FIREBASE_API_KEY,
- * then Deploy → Manage deployments → Edit → New version (or New deployment → Web app,
- * Execute as: Me, Who has access: Anyone). See README.md for the full steps.
+ * This file is Code.gs in the spreadsheet's Extensions → Apps Script project; the page is
+ * the HTML file Index.html in the same project. Deploy → New deployment → Web app with
+ * Execute as: Me and Who has access: Anyone within trevor.org, then embed the web app URL
+ * in the Google Site. See README.md for the full steps.
  *
- * Every request must carry a Firebase ID token, which is checked with Google before
- * anything is read or written. Only people listed on a roster tab can sign in:
+ * Google tells the script who is using the page (their signed-in school account), so there
+ * is no separate login. Only people listed on a roster tab get in:
  *   - "Admins", "Section 1", "Section 2":  one email per row in column A (any header row,
  *                     blank rows and "mailto:" links are fine). Admins manage the class;
  *                     a student's section is the tab they're on.
  * Other data:
- *   - the first tab:  Username, Name, Week, Hours, Notes  (one row per student per week;
- *                     Username is the student's email, Week is the week's start date)
- *   - "Users":        Email, Name, Joined, Last login     (created automatically; names
- *                     come from people's Google accounts the first time they sign in)
- *   - "Weeks":        Id, Label, Start, End, Auto         (created automatically)
- * If the Admins tab is empty, the first person to sign in is added to it.
+ *   - the first tab:  Username, Name, Week, Hours, Notes, Updated, Updated by, Excused, Late
+ *                     (one row per student per week; Username is the student's email and
+ *                     Week is the week's start date)
+ *   - "Users":        Email, Name, Joined, Last login          (created automatically)
+ *   - "Weeks":        Id, Label, Start, End, Auto, No class    (created automatically)
+ *   - "Settings":     Key, Value                               (created automatically)
+ * Columns the app doesn't know (a grade column, say) are never touched.
+ * Before anyone can sign in, type at least one admin's email into the Admins tab by hand.
  */
 
-// Your Firebase project's Web API key (Firebase console → Project settings → General → Web API key).
-const FIREBASE_API_KEY = 'AIzaSyBb8wcNriO5UCBHXG710Qz7Jo_Gba90Vq0';
+// The school's Google Workspace domain. Only used in messages; the deployment setting
+// "Who has access: Anyone within trevor.org" is what keeps other accounts out.
+const SCHOOL_DOMAIN = 'trevor.org';
 
-// Sent with every response so the site can tell admins when this script needs redeploying.
-// Bump it (and EXPECTED_SCRIPT_VERSION in index.html) whenever this file changes.
-const SCRIPT_VERSION = 1;
+// The Google Sites page the app is embedded in, for the link in "log your hours" reminder
+// emails. Leave blank to link to the web app's own URL instead.
+const SITE_URL = '';
+
+// Names come from the school directory when the optional Admin SDK service is turned on
+// (see README); a looked-up name is remembered this long.
+const NAME_CACHE_SECONDS = 6 * 60 * 60;
 
 const HOURS_SHEET = ''; // blank = first tab
 const USERS_SHEET = 'Users';
@@ -32,12 +40,12 @@ const ADMINS_SHEET = 'Admins';
 const SECTIONS = ['Section 1', 'Section 2'];
 const WEEKS_SHEET = 'Weeks';
 
-const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused'];
+const HOURS_HEADERS = ['Username', 'Name', 'Week', 'Hours', 'Notes', 'Updated', 'Updated by', 'Excused', 'Late'];
 const USERS_HEADERS = ['Email', 'Name', 'Joined', 'Last login'];
 // Tabs the app manages itself: a missing column header is added instead of reported.
 const OWN_TABS = [USERS_SHEET, 'Weeks', 'Settings'];
 // Columns added by newer versions of the app; they're added to any tab that lacks them.
-const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class'];
+const OPTIONAL_HEADERS = ['Last login', 'Updated', 'Updated by', 'Excused', 'No class', 'Late'];
 const SETTINGS_SHEET = 'Settings';
 const SETTINGS_HEADERS = ['Key', 'Value'];
 // Students can change a week until this many days after it ends, unless the admin changes it.
@@ -46,16 +54,12 @@ const DEFAULT_GRACE_DAYS = 2;
 const LOGIN_EVERY_MS = 5 * 60 * 1000;
 const WEEKS_HEADERS = ['Id', 'Label', 'Start', 'End', 'Auto', 'No class'];
 
+// Serves the page. ALLOWALL lets a Google Site (or any page) show it in an embed.
 function doGet() {
-  return json_({ ok: true, app: 'APW Hours Log' });
-}
-
-// Run this once from the Apps Script editor (select "authorize", click Run) to grant the
-// permissions the web app needs: editing this spreadsheet and contacting Firebase.
-function authorize() {
-  SpreadsheetApp.getActiveSpreadsheet().getName();
-  UrlFetchApp.fetch('https://identitytoolkit.googleapis.com/', { muteHttpExceptions: true });
-  Logger.log('Authorized. The web app can now check Firebase logins.');
+  return HtmlService.createHtmlOutputFromFile('Index')
+    .setTitle('APW Hours Log')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
 // Actions that change the sheet. They take the script lock up front; everything else
@@ -63,23 +67,35 @@ function authorize() {
 const WRITE_ACTIONS = ['saveEntry', 'deleteEntry', 'excuseEntry', 'saveWeek', 'addWeeks', 'deleteWeek', 'addUsers', 'removeUser', 'saveSettings'];
 
 // Per-request state: tab reads are remembered until something is written (each Sheets
-// call is slow), and the lock is only held when this request needs to write.
-let REQ = { memo: {}, lock: null };
+// call is slow), and the lock is only held when this request needs to write. `keep` holds
+// values that don't depend on the sheet's contents, so writes don't clear it.
+let REQ = { memo: {}, keep: {}, lock: null };
 
-function doPost(e) {
+// The page's only way in: it calls api({ action, ... }) through google.script.run.
+// Any other top-level function without a trailing "_" could be called from the page too,
+// so every helper's name ends in "_". Returns a JSON string, which avoids google.script.run's
+// limits on what objects it can pass back.
+function api(body) {
   let result;
-  REQ = { memo: {}, lock: null };
+  REQ = { memo: {}, keep: {}, lock: null };
   try {
-    const body = JSON.parse((e.postData && e.postData.contents) || '{}');
-    const auth = verifyToken_(body.idToken);
+    body = body && typeof body === 'object' ? body : {};
+    const auth = currentUser_();
     if (WRITE_ACTIONS.indexOf(body.action) !== -1) lock_();
     result = route_(body, auth);
   } catch (err) {
-    result = { error: String((err && err.message) || err) };
+    if (err && err.forUser) {
+      result = { error: err.message };
+    } else {
+      // Unexpected errors can mention tab names or other internals: log them for the
+      // script owner (Apps Script → Executions) and send the browser a plain message.
+      console.error((err && err.stack) || err);
+      result = { error: 'Something went wrong. Please try again, and tell your teacher if it keeps happening.' };
+    }
   } finally {
     if (REQ.lock) REQ.lock.releaseLock();
   }
-  return json_(result);
+  return JSON.stringify(result);
 }
 
 function memo_(key, fn) {
@@ -87,6 +103,14 @@ function memo_(key, fn) {
   const value = fn(); // may call changed_(), which replaces REQ.memo, so store afterwards
   REQ.memo[key] = value;
   return value;
+}
+
+// Remembered for the whole request, even across writes: the time zone, today's date and
+// converted dates. Each of these costs a call to a Google service, and they used to be
+// asked for again on every row of the hours tab.
+function keep_(key, fn) {
+  if (!(key in REQ.keep)) REQ.keep[key] = fn();
+  return REQ.keep[key];
 }
 
 // Call after any write so later reads in this request see it.
@@ -98,20 +122,25 @@ function changed_() {
 // case another request may have written in the meantime and the caller should re-check.
 function lock_() {
   if (REQ.lock) return false;
-  REQ.lock = LockService.getScriptLock();
-  REQ.lock.waitLock(20000);
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (e) {
+    fail_('The server is busy. Please try again in a moment.');
+  }
+  REQ.lock = lock;
   changed_();
   return true;
 }
 
 function route_(body, auth) {
   // Loading the page ("me") counts as signing in; saves and other actions don't.
-  const me = registerUser_(auth, body.name, body.action === 'me');
+  const me = registerUser_(auth, body.action === 'me');
   const requireAdmin = () => { if (!me.is_admin) fail_('Admins only'); };
   switch (body.action) {
     case 'me': {
       const weeks = listWeeks_();
-      const result = { user: me, weeks, entries: entriesFor_(me.email, weeks), settings: settings_() };
+      const result = { user: me, weeks, entries: entriesFor_(me.email), settings: settings_(), site_url: siteUrl_(), app_url: appUrl_() };
       // Admins land on the admin panel, so send its data now and save a second (slow) round trip.
       if (me.is_admin && body.withOverview) result.overview = overview_();
       return result;
@@ -122,15 +151,16 @@ function route_(body, auth) {
       const target = entryTarget_(me, body);
       if (body.action === 'saveEntry') saveEntry_(me, target, body);
       else deleteEntry_(me, target, body);
-      const result = { entries: entriesFor_(target.email, listWeeks_()) };
-      if (target.email !== me.email) result.overview = overview_();
+      const result = { entries: entriesFor_(target.email) };
+      // Admins get the overview back too, so the admin panel is never behind their own change.
+      if (me.is_admin) result.overview = overview_();
       return result;
     }
     case 'excuseEntry': {
       requireAdmin();
       const target = entryTarget_(me, body);
       excuseEntry_(me, target, body);
-      return { entries: entriesFor_(target.email, listWeeks_()), overview: overview_() };
+      return { entries: entriesFor_(target.email), overview: overview_() };
     }
     case 'addWeeks':
       requireAdmin();
@@ -140,6 +170,8 @@ function route_(body, auth) {
       requireAdmin();
       saveSettings_(body);
       return { settings: settings_(), weeks: listWeeks_(), overview: overview_() };
+    case 'classmates':
+      return classmates_();
     case 'overview':
       requireAdmin();
       return overview_();
@@ -167,42 +199,63 @@ function route_(body, auth) {
 
 // ---------- auth ----------
 
-// Checks a Firebase ID token with Google and returns { uid, email, name }.
-function verifyToken_(idToken) {
-  if (FIREBASE_API_KEY.indexOf('PASTE') === 0) fail_('Set FIREBASE_API_KEY in the Apps Script first');
-  if (!idToken) fail_('Please log in');
+// { email } of the person using the page, from the Google account they're signed in with.
+// Google fills this in itself, so the page can't claim to be someone else. It's only
+// available to people in the same Google Workspace domain as the script's owner, which is
+// why the script must be owned by a @trevor.org account and deployed to "Anyone within
+// trevor.org".
+function currentUser_() {
+  const email = String(Session.getActiveUser().getEmail() || '').trim().toLowerCase();
+  if (!email) {
+    fail_(`Google didn't say who you are. Open this page while signed in to your @${SCHOOL_DOMAIN} Google account.`);
+  }
+  return { email };
+}
+
+// The person's name from the school directory, or '' if the optional Admin SDK service isn't
+// turned on or the directory doesn't share it.
+function directoryName_(email) {
+  if (typeof AdminDirectory === 'undefined') return '';
   const cache = CacheService.getScriptCache();
-  const key = 'tok:' + Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, idToken));
+  const key = 'name:' + email;
   const hit = cache.get(key);
-  if (hit) return JSON.parse(hit);
-  const res = UrlFetchApp.fetch(
-    'https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(FIREBASE_API_KEY),
-    { method: 'post', contentType: 'application/json', payload: JSON.stringify({ idToken }), muteHttpExceptions: true }
-  );
-  const data = JSON.parse(res.getContentText() || '{}');
-  const user = data.users && data.users[0];
-  if (res.getResponseCode() !== 200 || !user || !user.email || user.disabled) fail_('Your login expired. Please log in again.');
-  const auth = { uid: user.localId, email: String(user.email).toLowerCase(), name: user.displayName || '' };
-  cache.put(key, JSON.stringify(auth), 600);
-  return auth;
+  if (hit !== null) return JSON.parse(hit); // stored as JSON so a blank name is remembered too
+  let name = '';
+  try {
+    // "domain_public" lets a non-admin script owner read the fields the domain shares.
+    const user = AdminDirectory.Users.get(email, { viewType: 'domain_public', fields: 'name/fullName' });
+    name = String((user && user.name && user.name.fullName) || '');
+  } catch (e) {
+    console.warn('Directory lookup failed for ' + email + ': ' + e);
+  }
+  cache.put(key, JSON.stringify(name), NAME_CACHE_SECONDS);
+  return name;
+}
+
+// Where reminder emails send students: the Google Site if set, else this web app.
+function siteUrl_() {
+  return SITE_URL || appUrl_();
+}
+
+// This web app's own address (ends in /exec), for the page's "Open full screen" link.
+function appUrl_() {
+  try { return ScriptApp.getService().getUrl() || ''; } catch (e) { return ''; }
 }
 
 // Lets the user in only if they're on a roster tab, records their name the first time,
 // and (when `signingIn`) when they last signed in.
-function registerUser_(auth, name, signingIn) {
-  let access = access_(auth.email);
-  if (!access.is_admin && !access.section && rosterEmails_(ADMINS_SHEET).length === 0) {
-    lock_();
-    // Nobody is an admin yet, so the first person in becomes one.
-    if (rosterEmails_(ADMINS_SHEET).length === 0) appendToRoster_(ADMINS_SHEET, [auth.email]);
-    access = access_(auth.email);
-  }
+function registerUser_(auth, signingIn) {
+  // Admins are only ever added by hand in the sheet or by another admin: an empty Admins
+  // tab never lets the next person to sign in become one.
+  const access = access_(auth.email);
   if (!access.is_admin && !access.section) {
     fail_(`${auth.email} isn't on the class list yet. Ask your teacher to add you, then sign in again.`);
   }
-  const cleanName = String(name || auth.name || '').trim().slice(0, 80);
   const find = () => table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === auth.email);
   let row = find();
+  // Names come from the school directory, never from the page, and are only looked up for
+  // someone new or whose name cell is blank. Admins can also type names into the Users tab.
+  const cleanName = !row || !row.name ? directoryName_(auth.email).trim().slice(0, 80) : '';
   if (!row || (!row.name && cleanName)) {
     if (lock_()) row = find();
     const t = table_(USERS_SHEET, USERS_HEADERS);
@@ -211,7 +264,7 @@ function registerUser_(auth, name, signingIn) {
     row = find();
   }
   if (signingIn && row) {
-    const prev = loginMs_(row['last login']);
+    const prev = stampMs_(row['last login']);
     if (!prev || Date.now() - prev > LOGIN_EVERY_MS) {
       // Only this person's own cell changes, so no lock is needed; the leading ' keeps it as text.
       const t = table_(USERS_SHEET, USERS_HEADERS);
@@ -273,7 +326,7 @@ function rosterEmails_(name) {
 function appendToRoster_(name, emails) {
   if (!emails.length) return;
   const sh = rosterSheet_(name);
-  sh.getRange(sh.getLastRow() + 1, 1, emails.length, 1).setValues(emails.map(e => [e]));
+  sh.getRange(sh.getLastRow() + 1, 1, emails.length, 1).setValues(emails.map(e => [safe_(e)])); // never a formula
   changed_();
 }
 
@@ -414,27 +467,59 @@ function nextId_(weeks) {
 }
 
 // Make sure some week covers today, so students always have somewhere to log hours.
-// Creates the Monday–Sunday week containing today, trimmed so it doesn't overlap
-// any week the admin already set up. Admins can relabel or adjust it afterward.
+// The new week follows the pattern of the weeks before it (see nextWeek_). Admins can
+// relabel or adjust it afterward.
 function ensureCurrentWeek_() {
   const today = today_();
   let t = table_(WEEKS_SHEET, WEEKS_HEADERS);
   let weeks = weekRows_(t);
   const covered = () => weeks.some(w => w.start <= today && today <= w.end);
-  if (covered()) return;
+  if (covered() || !nextWeek_(weeks, today)) return;
   if (lock_()) {
     // Another request may have added it while we waited for the lock.
     t = table_(WEEKS_SHEET, WEEKS_HEADERS);
     weeks = weekRows_(t);
     if (covered()) return;
   }
-  let start = addDays_(today, -weekday_(today));
-  let end = addDays_(start, 6);
-  const prevEnd = weeks.filter(w => w.end < today).map(w => w.end).sort().pop();
+  const next = nextWeek_(weeks, today);
+  if (next) writeRow_(t, null, { id: nextId_(weeks), label: next.label, start: next.start, end: next.end, auto: 1 });
+}
+
+// The week to add so that today is covered: { start, end, label }, or null if today falls
+// in a gap of the schedule (a weekend between Monday–Friday weeks).
+//   - It continues from the latest week that ended before today, with the same length, so a
+//     class on Sunday–Saturday weeks keeps getting Sunday–Saturday weeks.
+//   - Short weeks that repeat weekly (Monday–Friday) keep their weekday. A one-off short
+//     week is followed by full 7-day weeks.
+//   - With no earlier week, it's this Monday–Sunday.
+//   - It never runs into a later week the admin has already set up.
+//   - "Week 7" is followed by "Week 8" when the new week comes straight after it.
+function nextWeek_(weeks, today) {
+  const prev = weeks.filter(w => w.end < today).sort((a, b) => (a.end < b.end ? 1 : -1))[0];
+  let start, end, label = '';
+  if (prev) {
+    const prevLen = daysBetween_(prev.start, prev.end) + 1;
+    const weekly = prevLen < 7 && weeks.some(w => w.start === addDays_(prev.start, -7));
+    const len = prevLen >= 7 || weekly ? prevLen : 7;
+    const period = Math.max(len, 7);
+    const first = weekly ? addDays_(prev.start, 7) : addDays_(prev.end, 1);
+    const skipped = Math.max(0, Math.floor(daysBetween_(first, today) / period));
+    start = addDays_(first, skipped * period);
+    end = addDays_(start, len - 1);
+    if (start > today || end < today) return null;
+    const num = /^week\s*(\d+)$/i.exec(prev.label.trim());
+    if (num && skipped === 0) {
+      const wanted = `Week ${Number(num[1]) + 1}`;
+      const squash = v => String(v).replace(/\s+/g, '').toLowerCase();
+      if (!weeks.some(w => squash(w.label) === squash(wanted))) label = wanted;
+    }
+  } else {
+    start = addDays_(today, -weekday_(today));
+    end = addDays_(start, 6);
+  }
   const nextStart = weeks.filter(w => w.start > today).map(w => w.start).sort()[0];
-  if (prevEnd && addDays_(prevEnd, 1) > start) start = addDays_(prevEnd, 1);
-  if (nextStart && addDays_(nextStart, -1) < end) end = addDays_(nextStart, -1);
-  writeRow_(t, null, { id: nextId_(weeks), label: '', start, end, auto: 1 });
+  if (nextStart && nextStart <= end) end = addDays_(nextStart, -1);
+  return { start, end, label };
 }
 
 function findWeek_(id) {
@@ -476,9 +561,26 @@ function saveWeek_(body) {
   const { clash, replaceable } = overlaps_(weeks, w.start, w.end, id);
   if (clash) fail_(`Overlaps ${clash.label || 'the week'} (${clash.start} to ${clash.end})`);
   const fields = { label: w.label, start: w.start, end: w.end, auto: 0, 'no class': w.no_class ? 'yes' : '' };
-  if (editing) writeRow_(t, editing._row, fields);
-  else writeRow_(t, null, Object.assign({ id: nextId_(weeks) }, fields));
+  if (editing) {
+    redateHours_(weeks, editing, w.start);
+    writeRow_(t, editing._row, fields);
+  } else {
+    writeRow_(t, null, Object.assign({ id: nextId_(weeks) }, fields));
+  }
   deleteRows_(t, replaceable.map(x => x._row));
+}
+
+// Hours rows carry their week's start date in the Week column. When a week's dates are
+// edited, its rows are moved along to the new start date, so they stay with the week
+// instead of dropping out of the app. Call before the week itself is changed.
+function redateHours_(weeks, week, newStart) {
+  const t = table_(HOURS_SHEET, HOURS_HEADERS);
+  const cells = t.rows
+    .filter(r => r.username && toIso_(r.week) !== newStart && (weekFor_(weeks, toIso_(r.week)) || {}).id === week.id)
+    .map(r => columnLetter_(t.cols.week + 1) + r._row);
+  if (!cells.length) return;
+  t.sh.getRangeList(cells).setValue(newStart); // one write, only the cells that change
+  changed_();
 }
 
 // Adds many weeks at once (all or nothing): none may overlap each other or an existing week.
@@ -511,32 +613,44 @@ function deleteWeek_(id) {
 
 // ---------- hours ----------
 
-// { email: { weekId: { week_id, hours, description } } } — a row belongs to whichever
-// week contains the date in its Week column.
-function hoursByUser_(weeks) {
-  const out = {};
-  table_(HOURS_SHEET, HOURS_HEADERS).rows.forEach(r => {
-    const email = String(r.username).toLowerCase();
-    const week = weekFor_(weeks, toIso_(r.week));
-    const hours = Number(r.hours);
-    const excused = truthy_(r.excused);
-    if (!email || !week) return;
-    if (!excused && (r.hours === '' || !isFinite(hours))) return;
-    const updated = loginMs_(r.updated);
-    const updatedBy = String(r['updated by'] || '').trim().toLowerCase();
-    const updatedDay = typeof r.updated === 'string' ? toIso_(r.updated.slice(0, 10)) : toIso_(r.updated);
-    (out[email] = out[email] || {})[week.id] = {
-      week_id: week.id, hours: excused ? 0 : hours, description: String(r.notes), excused,
-      updated, updated_by: updatedBy || null,
-      // Logged by the student after the week was over (during the grace period).
-      late: !excused && !!updated && (!updatedBy || updatedBy === email) && updatedDay > week.end,
-    };
+// { email: { weekId: { week_id, hours, description, ... } } } — a row belongs to the week
+// starting on the date in its Week column, or else the week containing it. Worked out once
+// per request (and again after a write).
+function hoursByUser_() {
+  return memo_('hours', () => {
+    const weeks = listWeeks_();
+    const out = {};
+    table_(HOURS_SHEET, HOURS_HEADERS).rows.forEach(r => {
+      const email = String(r.username).toLowerCase();
+      const week = weekFor_(weeks, toIso_(r.week));
+      const hours = Number(r.hours);
+      const excused = truthy_(r.excused);
+      if (!email || !week) return;
+      if (!excused && (r.hours === '' || !isFinite(hours))) return;
+      const updatedBy = String(r['updated by'] || '').trim().toLowerCase();
+      (out[email] = out[email] || {})[week.id] = {
+        week_id: week.id, hours: excused ? 0 : hours, description: String(r.notes), excused,
+        updated: stampMs_(r.updated), updated_by: updatedBy || null,
+        late: !excused && rowLate_(r, email, week),
+      };
+    });
+    return out;
   });
-  return out;
 }
 
-function entriesFor_(email, weeks) {
-  return hoursByUser_(weeks)[email] || {};
+// Whether a row's hours were first logged by the student after the week was over. The Late
+// column ("yes" / "no") is filled in when hours are first logged and kept through later
+// edits. Rows from before that column existed fall back to their last-updated time.
+function rowLate_(r, email, week) {
+  const cell = String(r.late == null ? '' : r.late).trim();
+  if (cell) return truthy_(cell);
+  const updatedBy = String(r['updated by'] || '').trim().toLowerCase();
+  const updatedDay = typeof r.updated === 'string' ? toIso_(r.updated.slice(0, 10)) : toIso_(r.updated);
+  return !!r.updated && (!updatedBy || updatedBy === email) && updatedDay > week.end;
+}
+
+function entriesFor_(email) {
+  return hoursByUser_()[email] || {};
 }
 
 function userWeekRows_(t, email, week) {
@@ -577,9 +691,15 @@ function saveEntry_(me, target, body) {
   if (notes.length > 2000) fail_('Description is too long (2000 characters max)');
   const t = table_(HOURS_SHEET, HOURS_HEADERS);
   const rows = userWeekRows_(t, target.email, week);
+  const existing = rows.length ? t.rows.find(r => r._row === rows[0]) : null;
+  const hadHours = !!existing && !truthy_(existing.excused) && existing.hours !== '' && isFinite(Number(existing.hours));
+  // Late is decided when hours are first logged: fixing a typo later doesn't turn an on-time
+  // entry late, and an admin entering hours for a student never counts as late.
+  const late = hadHours ? rowLate_(existing, target.email, week) : me.email === target.email && today_() > week.end;
   writeRow_(t, rows[0] || null, {
     username: target.email, name: target.name, week: week.start, hours, notes,
     updated: stamp_(), 'updated by': me.email, excused: '', // logging hours replaces an excuse
+    late: late ? 'yes' : 'no',
   });
   deleteRows_(t, rows.slice(1)); // drop duplicates for the same week
 }
@@ -592,7 +712,7 @@ function excuseEntry_(me, target, body) {
   const rows = userWeekRows_(t, target.email, week);
   writeRow_(t, rows[0] || null, {
     username: target.email, name: target.name, week: week.start, hours: '', notes: reason,
-    updated: stamp_(), 'updated by': me.email, excused: 'yes',
+    updated: stamp_(), 'updated by': me.email, excused: 'yes', late: '',
   });
   deleteRows_(t, rows.slice(1));
 }
@@ -604,6 +724,32 @@ function deleteEntry_(me, target, body) {
   deleteRows_(t, userWeekRows_(t, target.email, week));
 }
 
+// What everyone in the class has logged, for the Class tab every student can open.
+// Less than the admin overview: names, sections, hours and notes only - no emails,
+// sign-in times or late marks.
+function classmates_() {
+  const weeks = listWeeks_();
+  const hours = hoursByUser_();
+  const names = {};
+  table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => { names[String(r.email).toLowerCase()] = String(r.name || ''); });
+  const seen = {};
+  const students = [];
+  SECTIONS.forEach(section => rosterEmails_(section).forEach(email => {
+    if (seen[email]) return;
+    seen[email] = true;
+    const mine = hours[email] || {};
+    const entries = {};
+    let total = 0;
+    Object.keys(mine).forEach(id => {
+      entries[id] = { hours: mine[id].hours, description: mine[id].description, excused: mine[id].excused };
+      total += mine[id].hours;
+    });
+    students.push({ name: names[email] || email.split('@')[0], section, entries, total: Math.round(total * 100) / 100 });
+  }));
+  students.sort((a, b) => a.name.localeCompare(b.name));
+  return { weeks, students, sections: SECTIONS };
+}
+
 // ---------- admin views ----------
 
 // Everyone on a roster, with their hours. Students are the people in a section;
@@ -611,13 +757,13 @@ function deleteEntry_(me, target, body) {
 function overview_() {
   const weeks = listWeeks_();
   // Descriptions are included so the admin page can open a student's weeks without another request.
-  const hours = hoursByUser_(weeks);
+  const hours = hoursByUser_();
   const names = {};
   const logins = {};
   table_(USERS_SHEET, USERS_HEADERS).rows.forEach(r => {
     const email = String(r.email).toLowerCase();
     names[email] = String(r.name || '');
-    logins[email] = loginMs_(r['last login']);
+    logins[email] = stampMs_(r['last login']);
   });
   const admins = rosterEmails_(ADMINS_SHEET);
   const people = {};
@@ -650,9 +796,9 @@ function userEntries_(email) {
   const row = table_(USERS_SHEET, USERS_HEADERS).rows.find(r => String(r.email).toLowerCase() === email);
   const weeks = listWeeks_();
   return {
-    user: { email, name: String((row && row.name) || email), is_admin: access.is_admin, section: access.section, signed_in: !!row, last_login: row ? loginMs_(row['last login']) : null },
+    user: { email, name: String((row && row.name) || email), is_admin: access.is_admin, section: access.section, signed_in: !!row, last_login: row ? stampMs_(row['last login']) : null },
     weeks,
-    entries: entriesFor_(email, weeks),
+    entries: entriesFor_(email),
   };
 }
 
@@ -708,32 +854,37 @@ function readTable_(name, headers) {
 }
 
 function cell_(v) {
-  // Date cells from getValues() don't always pass `instanceof Date`, so check the tag instead.
-  if (Object.prototype.toString.call(v) === '[object Date]' || (v && typeof v.getTime === 'function')) {
-    return Utilities.formatDate(v, tz_(), 'yyyy-MM-dd');
+  return isDate_(v) ? formatDay_(v) : (typeof v === 'string' ? v.trim() : v);
+}
+
+// Writes `lines` (arrays as wide as the tab) starting at sheet row `row`, but only the
+// columns named in `keys`. Every other column, such as one a teacher adds for grades or a
+// formula, is left exactly as it is. Neighbouring columns go in one write.
+function writeCols_(t, row, lines, keys) {
+  const cols = keys.map(k => t.cols[k]).sort((a, b) => a - b);
+  for (let i = 0; i < cols.length;) {
+    let j = i;
+    while (j + 1 < cols.length && cols[j + 1] === cols[j] + 1) j++;
+    t.sh.getRange(row, cols[i] + 1, lines.length, j - i + 1).setValues(lines.map(l => l.slice(cols[i], cols[j] + 1)));
+    i = j + 1;
   }
-  return typeof v === 'string' ? v.trim() : v;
+  changed_();
+}
+
+function toLine_(t, fields) {
+  const line = new Array(t.width).fill('');
+  Object.keys(fields).forEach(k => { line[t.cols[k]] = safe_(fields[k]); });
+  return line;
+}
+
+// Appends several rows (all with the same fields) in one go.
+function appendRows_(t, list) {
+  if (list.length) writeCols_(t, t.sh.getLastRow() + 1, list.map(f => toLine_(t, f)), Object.keys(list[0]));
 }
 
 // Writes fields into sheet row `row`, or appends a new row when `row` is null.
-// Appends several rows in one write.
-function appendRows_(t, list) {
-  if (!list.length) return;
-  const lines = list.map(fields => {
-    const line = new Array(t.width).fill('');
-    Object.keys(fields).forEach(k => { line[t.cols[k]] = safe_(fields[k]); });
-    return line;
-  });
-  t.sh.getRange(t.sh.getLastRow() + 1, 1, lines.length, t.width).setValues(lines);
-  changed_();
-}
-
 function writeRow_(t, row, fields) {
-  const existing = row ? t.rows.find(r => r._row === row) : null;
-  const line = existing ? existing._raw.slice() : new Array(t.width).fill('');
-  Object.keys(fields).forEach(k => { line[t.cols[k]] = safe_(fields[k]); });
-  t.sh.getRange(row || t.sh.getLastRow() + 1, 1, 1, t.width).setValues([line]);
-  changed_();
+  writeCols_(t, row || t.sh.getLastRow() + 1, [toLine_(t, fields)], Object.keys(fields));
 }
 
 // Text starting with = + - @ would be run as a formula; a leading ' keeps it as text.
@@ -749,43 +900,56 @@ function deleteRows_(t, rows) {
 
 // ---------- misc ----------
 
+// Stops the request with a message meant for the person using the site. Any other error
+// is replaced by a generic message before it reaches the browser (see doPost).
 function fail_(message) {
-  throw new Error(message);
-}
-
-function json_(obj) {
-  const body = Object.assign({ version: SCRIPT_VERSION }, obj);
-  return ContentService.createTextOutput(JSON.stringify(body)).setMimeType(ContentService.MimeType.JSON);
+  const err = new Error(message);
+  err.forUser = true;
+  throw err;
 }
 
 function tz_() {
-  return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+  return keep_('tz', () => SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone());
 }
 
 function today_() {
-  return Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd');
+  return keep_('today', () => Utilities.formatDate(new Date(), tz_(), 'yyyy-MM-dd'));
 }
 
-// A "Last login" cell as ms since 1970, or null. Written as "yyyy-MM-dd HH:mm" text.
-function loginMs_(v) {
+// Date cells from getValues() don't always pass `instanceof Date`, so check the tag instead.
+function isDate_(v) {
+  return Object.prototype.toString.call(v) === '[object Date]' || (!!v && typeof v.getTime === 'function');
+}
+
+// A date cell as yyyy-mm-dd in the spreadsheet's time zone. Each distinct date is only
+// converted once per request; a tab has many rows but few different dates.
+function formatDay_(d) {
+  return keep_('fmt:' + d.getTime(), () => Utilities.formatDate(d, tz_(), 'yyyy-MM-dd'));
+}
+
+// A "yyyy-MM-dd HH:mm" stamp (Last login, Updated) as ms since 1970, or null. Midnight of
+// each day is looked up once per request and the time of day is added on, so on the two
+// days a year the clocks change a stamp can be an hour out. It only feeds "x h ago" text.
+function stampMs_(v) {
   if (v === '' || v == null) return null;
-  if (Object.prototype.toString.call(v) === '[object Date]' || typeof v.getTime === 'function') return v.getTime();
-  const s = String(v).trim();
-  for (const pattern of ['yyyy-MM-dd HH:mm', 'yyyy-MM-dd']) {
+  if (isDate_(v)) return v.getTime();
+  const m = String(v).trim().match(/^(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}):(\d{2}))?$/);
+  if (!m) return null;
+  const midnight = keep_('day:' + m[1], () => {
     try {
-      const d = Utilities.parseDate(s, tz_(), pattern);
-      if (d && !isNaN(d.getTime())) return d.getTime();
-    } catch (e) { /* try the next pattern */ }
-  }
-  return null;
+      const d = Utilities.parseDate(m[1], tz_(), 'yyyy-MM-dd');
+      return d && !isNaN(d.getTime()) ? d.getTime() : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  return midnight === null ? null : midnight + (Number(m[2] || 0) * 60 + Number(m[3] || 0)) * 60000;
 }
 
 // Dates typed into the sheet by hand come in many shapes; turn the common ones into
 // yyyy-mm-dd so they compare correctly as text ("2026-10-4" would sort after "2026-10-25").
 function toIso_(v) {
-  if (Object.prototype.toString.call(v) === '[object Date]' || (v && typeof v.getTime === 'function')) {
-    return Utilities.formatDate(v, tz_(), 'yyyy-MM-dd');
-  }
+  if (isDate_(v)) return formatDay_(v);
   const s = String(v == null ? '' : v).trim();
   const pad = n => String(n).padStart(2, '0');
   let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
@@ -799,6 +963,18 @@ function isIsoDate_(s) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const d = new Date(s + 'T12:00:00Z');
   return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+// Whole days from one yyyy-mm-dd date to another.
+function daysBetween_(from, to) {
+  return Math.round((new Date(to + 'T12:00:00Z') - new Date(from + 'T12:00:00Z')) / 864e5);
+}
+
+// 1 -> "A", 27 -> "AA": a column number as its letter, for A1-style cell addresses.
+function columnLetter_(n) {
+  let s = '';
+  for (; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+  return s;
 }
 
 function addDays_(iso, n) {

@@ -36,6 +36,10 @@
   button.ghost, a.button.ghost { background: transparent; color: var(--text); border-color: var(--border); }
   button.ghost.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   button.small { padding: 4px 10px; font-size: 13px; }
+  .admin-tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 1px solid var(--border); }
+  .admin-tabs button { background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 14px; margin-bottom: -1px; }
+  .admin-tabs button:hover { color: var(--text); }
+  .admin-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
   button.danger { background: transparent; color: var(--danger); border-color: transparent; }
   button:disabled { opacity: .5; cursor: default; }
   .error { color: var(--danger); font-size: 14px; min-height: 20px; margin-top: 8px; }
@@ -168,6 +172,12 @@
 </template>
 
 <template id="tpl-admin">
+  <div class="admin-tabs" role="tablist" id="admin-tabs">
+    <button type="button" role="tab" data-tab="users">Users</button>
+    <button type="button" role="tab" data-tab="activity">Activity</button>
+    <button type="button" role="tab" data-tab="weeks">Weeks</button>
+  </div>
+  <div data-panel="activity" role="tabpanel">
   <div class="card">
     <h2>Class overview</h2>
     <div class="toolbar">
@@ -202,6 +212,8 @@
     <div class="toolbar" id="detail-actions"></div>
     <div id="detail-weeks"></div>
   </div>
+  </div>
+  <div data-panel="users" role="tabpanel">
   <div class="card" id="class-list">
     <h2>Class list</h2>
     <p class="muted" style="font-size:13px;margin:-6px 0 14px">Only people on this list can sign in. Adding a student to a section moves them out of the other one.</p>
@@ -213,6 +225,8 @@
     <div class="error" id="roster-msg"></div>
     <div class="roster-lists" id="roster-lists"></div>
   </div>
+  </div>
+  <div data-panel="weeks" role="tabpanel">
   <div class="card">
     <h2>Weeks</h2>
     <p class="muted" style="font-size:13px;margin:-6px 0 14px">Set the date range for each week. Students can log hours for a week once its start date arrives.</p>
@@ -249,6 +263,7 @@
       <div class="table-wrap"><table id="bulk-preview"></table></div>
       <div style="display:flex;gap:8px;align-items:center;margin-top:10px"><button type="button" id="b-create">Create weeks</button><span class="error" id="bulk-msg" style="margin:0"></span></div>
     </details>
+  </div>
   </div>
 </template>
 
@@ -627,6 +642,14 @@ async function renderClass() {
 let adminWeek = null;
 let adminSort = "name";
 let adminSection = "";
+let adminTab = "activity"; // the open admin tab; kept when the panel redraws after a change
+
+// Shows one admin tab (users, activity or weeks) and hides the other two.
+function showAdminTab(tab) {
+  adminTab = tab;
+  app.querySelectorAll("#admin-tabs [data-tab]").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
+  app.querySelectorAll("[data-panel]").forEach(p => p.classList.toggle("hidden", p.dataset.panel !== tab));
+}
 
 // `prefetched` is an overview that came with another response (sign-in, or a change the
 // admin just made); without one, the latest is fetched.
@@ -639,6 +662,8 @@ async function renderAdmin(prefetched) {
   const sections = overview.sections || ["Section 1", "Section 2"];
   const students = people.filter(s => s.section); // admins without a section don't log hours
   app.replaceChildren($("#tpl-admin").content.cloneNode(true));
+  showAdminTab(adminTab);
+  $("#admin-tabs").onclick = e => { const t = e.target.closest("[data-tab]"); if (t) showAdminTab(t.dataset.tab); };
   if (!weeks.some(w => w.id === adminWeek)) adminWeek = defaultWeek(weeks);
   if (adminSection && !sections.includes(adminSection)) adminSection = "";
   $("#sort").value = adminSort;
@@ -705,8 +730,8 @@ async function renderAdmin(prefetched) {
   $("#detail-close").onclick = () => $("#detail").classList.add("hidden");
   $("#refresh").onclick = () => renderAdmin().catch(ex => fatal(ex.message));
   $("#add-people").onclick = () => {
-    $("#class-list").scrollIntoView({ behavior: "smooth", block: "start" });
-    $("#r-emails").focus({ preventScroll: true });
+    showAdminTab("users");
+    $("#r-emails").focus();
   };
   $("#export").onclick = () => {
     // A leading = + - @ (or tab / return) would run as a formula in Excel or Sheets; a leading ' keeps it as text.
